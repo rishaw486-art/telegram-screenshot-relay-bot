@@ -28,6 +28,7 @@ from billing import SendRecurringStarsInvoice
 from capture import CaptureError, capture_web, render_file
 from miniapp import MiniAppError, authenticated_webview_url, parse_miniapp_link
 from storage import Store
+from vision import describe_image
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -80,6 +81,9 @@ async def _paid_or_prompt(message: Message) -> bool:
 async def _send_preview(
     message: Message, image: bytes, title: str, description: str
 ) -> None:
+    visual_description = await describe_image(image, settings)
+    if visual_description:
+        description = visual_description
     caption = f"<b>{_escape(title[:200])}</b>\n{_escape(description[:700])}"
     await message.answer_photo(
         BufferedInputFile(image, filename="preview.png"), caption=caption[:1024]
@@ -133,7 +137,7 @@ async def start(message: Message, command: CommandObject) -> None:
     await message.answer(
         "Hi! I can capture screenshots and short descriptions of public websites, supported files, "
         "and approved Telegram Mini Apps. Use /buy to unlock the paid features.\n\n"
-        "Commands: /buy, /status, /relay @username message, /stoprelay, /paysupport."
+        "Commands: /buy, /status, /relay @username message, /stoprelay, /paysupport, /privacy."
     )
 
 
@@ -655,14 +659,14 @@ async def text_message(message: Message) -> None:
 @dp.message(Command("help"))
 async def help_command(message: Message) -> None:
     await message.answer(
-        "Send a website URL or supported image/PDF/text file for a screenshot and description.\n\nCommands: /buy, /status, /cancel, /relay @username message, /stoprelay, /paysupport.\n\nRelay messages are delivered only after the recipient starts the bot and accepts. Both participants need paid access. Mini App capture uses only owner-approved bots and a dedicated userbot session."
+        "Send a website URL or supported image/PDF/text file for a screenshot and description.\n\nCommands: /buy, /status, /cancel, /relay @username message, /stoprelay, /paysupport, /privacy.\n\nRelay messages are delivered only after the recipient starts the bot and accepts. Both participants need paid access. Mini App capture uses only owner-approved bots and a dedicated userbot session."
     )
 
 
 @dp.message(Command("privacy"))
 async def privacy_command(message: Message) -> None:
     await message.answer(
-        "Website pages are opened in an isolated browser. Uploaded images, PDFs, and text files are downloaded temporarily for preview and deleted after processing; unsupported files are not executed. Relay requests are held until accepted, then only the message text and active conversation state needed to deliver replies are stored. For an approved Mini App, a dedicated owner-authorized Telegram account opens the app; the app may receive that account's Telegram profile/init data. The authenticated launch URL is not returned to you or intentionally logged. Do not send links or files you are not authorized to share."
+        "Website pages are opened in an isolated browser. Uploaded images, PDFs, and text files are downloaded temporarily for preview and deleted after processing; unsupported files are not executed. By default, screenshots stay within the bot worker. If the owner explicitly enables remote vision, screenshots are sent to the configured vision provider for captions. Relay requests are held until accepted, then only the message text and active conversation state needed to deliver replies are stored. For an approved Mini App, a dedicated owner-authorized Telegram account opens the app; the app may receive that account's Telegram profile/init data. The authenticated launch URL is not returned to you or intentionally logged. Do not send links or files you are not authorized to share."
     )
 
 

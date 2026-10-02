@@ -1,7 +1,10 @@
+import asyncio
 from pathlib import Path
 
+from app_settings import Settings
 from miniapp import parse_miniapp_link
 from storage import Store
+from vision import describe_image
 
 
 def test_parse_direct_miniapp_link():
@@ -45,3 +48,13 @@ def test_subscription_and_relay_state(tmp_path: Path):
     assert store.conversations_for(20) == [10]
     assert store.deactivate_conversations(10) == [20]
     assert store.conversations_for(20) == []
+
+
+def test_remote_vision_requires_explicit_enable_and_api_key(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:fake")
+    monkeypatch.setenv("BOT_USERNAME", "testbot")
+    monkeypatch.setenv("ENABLE_REMOTE_VISION", "true")
+    monkeypatch.delenv("VISION_API_KEY", raising=False)
+    settings = Settings.from_env()
+    assert not settings.remote_vision_enabled
+    assert asyncio.run(describe_image(b"not-sent", settings)) is None

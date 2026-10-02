@@ -33,6 +33,10 @@ class Settings:
     userbot_session: str | None
     miniapp_allowed_bots: frozenset[str]
     support_admin_ids: frozenset[int]
+    vision_enabled: bool
+    vision_api_key: str | None
+    vision_api_base: str
+    vision_model: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -58,6 +62,13 @@ class Settings:
             userbot_session=os.getenv("TELEGRAM_USERBOT_SESSION") or None,
             miniapp_allowed_bots=_csv_env("MINIAPP_ALLOWED_BOTS"),
             support_admin_ids=admins,
+            vision_enabled=os.getenv("ENABLE_REMOTE_VISION", "false").lower()
+            in {"1", "true", "yes"},
+            vision_api_key=os.getenv("VISION_API_KEY") or None,
+            vision_api_base=os.getenv(
+                "VISION_API_BASE", "https://api.openai.com/v1"
+            ).rstrip("/"),
+            vision_model=os.getenv("VISION_MODEL", "gpt-4o-mini"),
         )
 
     @property
@@ -68,3 +79,7 @@ class Settings:
             and self.userbot_session
             and self.miniapp_allowed_bots
         )
+
+    @property
+    def remote_vision_enabled(self) -> bool:
+        return self.vision_enabled and bool(self.vision_api_key)

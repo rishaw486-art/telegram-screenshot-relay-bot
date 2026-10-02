@@ -5,9 +5,10 @@ An MVP Telegram bot that accepts website links and selected files, captures a sc
 ## Features implemented
 
 - Telegram Stars recurring invoice (`XTR`, 250 Stars, 30-day subscription); access is granted only on Telegram's successful-payment update.
-- `/buy`, `/status`, `/cancel`, `/paysupport`, `/help`.
+- `/buy`, `/status`, `/cancel`, `/paysupport`, `/help`, `/privacy`.
 - Website screenshots using isolated Playwright Chromium, title/metadata/text descriptions, navigation timeouts, DNS/private-network checks, and per-request private-host blocking.
 - File previews for images, PDFs (first page), and UTF-8 text/Markdown/CSV/log files. No uploaded file is executed. Unsupported types are rejected.
+- Optional natural-language visual descriptions through an OpenAI-compatible vision API. This is **off by default**; enabling it transmits screenshots (including uploaded image/file previews) to the configured provider and may incur separate API charges.
 - Telegram Mini App capture using an owner-authorized Telethon userbot: inline WebApp buttons via `messages.requestWebView`, direct Mini App links via `messages.getBotApp` + `messages.requestAppWebView`, and owner-configured bot allowlisting. The returned authenticated URL is passed directly to a fresh Playwright context and is never sent to the requester.
 - Two-way relay via the bot after recipient start + explicit accept. Both users need active subscriptions. If the recipient has not started the bot, the requester receives an invite link to share; the bot does not cold-message them.
 - Replies on receipt, progress, results, payment state, errors, acceptance/decline, and relay delivery.
@@ -52,6 +53,10 @@ Docker Compose persists only the SQLite data volume. Temporary file downloads ar
 The bot sends a digital-service invoice with `currency="XTR"`, 250 Stars, an empty provider token, and `subscription_period=2592000`. It approves only the matching pre-checkout payload, amount, and currency; subscription access is then updated from `successful_payment`. Telegram requires digital goods/services sold inside Telegram to use Stars. The bot retains the Telegram charge ID for subscription cancellation/support.
 
 Set `SUPPORT_ADMIN_IDS` to one or more comma-separated numeric owner/support IDs if support messages should be escalated. `/paysupport` remains available without a subscription.
+
+## Optional visual captions
+
+The bot can request a natural-language caption for any screenshot through an OpenAI-compatible vision API. This is **disabled by default**. To opt in, set `ENABLE_REMOTE_VISION=true`, `VISION_API_KEY`, and (if needed) `VISION_API_BASE` / `VISION_MODEL` in the deployment's secret/config settings. When enabled, screenshot bytes—including previews made from user-uploaded files—are transmitted to that provider and may incur separate usage charges. `/privacy` describes this behavior to bot users.
 
 ## Configure the userbot Mini App capture
 
