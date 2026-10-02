@@ -1,9 +1,11 @@
 import asyncio
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
 
+import capture
 import health_server
 import storage
 import vision
@@ -12,6 +14,96 @@ from health_server import HealthServer
 from miniapp import parse_miniapp_link
 from storage import Store
 from vision import describe_image
+
+
+def test_apiflash_capture_posts_key_and_requests_full_page_png(monkeypatch):
+    captured = {}
+    png = b"\x89PNG\r\n\x1a\nimage-data"
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "image/png", "content-length": str(len(png))}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def aiter_bytes(self):
+            yield png
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["timeout"] = kwargs["timeout"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def stream(self, method, endpoint, *, data):
+            captured.update(method=method, endpoint=endpoint, data=data)
+            return FakeResponse()
+
+    monkeypatch.setattr(capture, "_public_http_url", lambda url: url)
+    monkeypatch.setattr(capture.httpx, "AsyncClient", FakeClient)
+    result = asyncio.run(
+        capture.capture_website_apiflash(
+            "https://example.com/path", "secret-key", 20, 1000
+        )
+    )
+    assert result == (
+        png,
+        "example.com",
+        "Website screenshot captured with ApiFlash.",
+    )
+    assert captured["method"] == "POST"
+    assert captured["endpoint"] == "https://api.apiflash.com/v1/urltoimage"
+    assert captured["data"] == {
+        "access_key": "secret-key",
+        "url": "https://example.com/path",
+        "full_page": "true",
+        "format": "png",
+    }
+
+
+def test_apiflash_capture_handles_missing_key_and_oversized_image(monkeypatch):
+    with pytest.raises(capture.CaptureError, match="APIFLASH_API_KEY"):
+        asyncio.run(
+            capture.capture_website_apiflash("https://example.com", None, 20, 1000)
+        )
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "image/png", "content-length": "100"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(capture, "_public_http_url", lambda url: url)
+    monkeypatch.setattr(capture.httpx, "AsyncClient", FakeClient)
+    with pytest.raises(capture.CaptureError, match="too large"):
+        asyncio.run(
+            capture.capture_website_apiflash("https://example.com", "key", 20, 10)
+        )
 
 
 def test_parse_direct_miniapp_link():
@@ -55,6 +147,29 @@ def test_subscription_and_relay_state(tmp_path: Path):
     assert store.conversations_for(20) == [10]
     assert store.deactivate_conversations(10) == [20]
     assert store.conversations_for(20) == []
+
+
+def test_owner_gifts_stack_and_work_for_unregistered_users(tmp_path: Path):
+    store = Store(tmp_path / "gifts.sqlite3")
+    store.register(10, "member")
+    current_expiry = int(time.time()) + 100_000
+    store.grant_subscription(10, current_expiry, "charge-preserved")
+
+    first_expiry = store.gift_subscription(10, 30 * 86_400)
+    assert first_expiry == current_expiry + 30 * 86_400
+    assert store.paid_until(10) == first_expiry
+    assert store.charge_id(10) == "charge-preserved"
+
+    before = int(time.time())
+    gifted_user_expiry = store.gift_subscription(999, 7 * 86_400)
+    assert before + 7 * 86_400 <= gifted_user_expiry <= int(
+        time.time()
+    ) + 7 * 86_400
+    assert not store.user_exists(999)
+    assert store.is_paid(999)
+    assert store.paid_until(999) == gifted_user_expiry
+    assert store.stats()["users"] == 1
+    assert store.stats()["paid_users"] == 2
 
 
 def test_userbot_reply_route_targets_only_one_requester(tmp_path: Path):
@@ -123,6 +238,15 @@ def test_remote_vision_requires_explicit_enable_and_api_key(monkeypatch):
     settings = Settings.from_env()
     assert not settings.remote_vision_enabled
     assert asyncio.run(describe_image(b"not-sent", settings)) is None
+
+
+def test_apiflash_api_key_is_read_from_environment(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:fake")
+    monkeypatch.setenv("BOT_USERNAME", "testbot")
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.setenv("APIFLASH_API_KEY", "  test-apiflash-key  ")
+    settings = Settings.from_env()
+    assert settings.apiflash_api_key == "test-apiflash-key"
 
 
 def test_groq_is_default_vision_provider_when_api_key_is_set(monkeypatch):

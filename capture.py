@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+import httpx
 import pymupdf as fitz
 from PIL import Image
 from playwright.async_api import async_playwright
@@ -67,6 +68,83 @@ def _host_is_public(host: str) -> bool:
         )
     except (OSError, ValueError):
         return False
+
+
+async def capture_website_apiflash(
+    url: str,
+    api_key: str | None,
+    timeout_seconds: int,
+    max_bytes: int,
+) -> tuple[bytes, str, str]:
+    """Capture a public website through ApiFlash, returning a bounded PNG image."""
+    if not api_key:
+        raise CaptureError(
+            "Website screenshots are not configured yet. The owner must set APIFLASH_API_KEY."
+        )
+    url = _public_http_url(url)
+    endpoint = "https://api.apiflash.com/v1/urltoimage"
+    params = {
+        "access_key": api_key,
+        "url": url,
+        "full_page": "true",
+        "format": "png",
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                float(timeout_seconds), connect=min(10.0, float(timeout_seconds))
+            )
+        ) as client:
+            async with client.stream("POST", endpoint, data=params) as response:
+                if response.status_code != 200:
+                    messages = {
+                        400: "ApiFlash could not capture this website URL.",
+                        401: "ApiFlash rejected its API key; the owner should check APIFLASH_API_KEY.",
+                        402: "The ApiFlash screenshot quota has been exhausted.",
+                        403: "The configured ApiFlash plan does not allow this capture request.",
+                        429: "ApiFlash is rate-limiting requests. Please try again later.",
+                    }
+                    raise CaptureError(
+                        messages.get(
+                            response.status_code,
+                            f"ApiFlash screenshot failed (HTTP {response.status_code}).",
+                        )
+                    )
+
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                if content_type != "image/png":
+                    raise CaptureError(
+                        "ApiFlash returned an unexpected response instead of a PNG screenshot."
+                    )
+                content_length = response.headers.get("content-length", "")
+                if content_length.isdigit() and int(content_length) > max_bytes:
+                    raise CaptureError(
+                        "The screenshot is too large to send through Telegram."
+                    )
+
+                chunks: list[bytes] = []
+                total_bytes = 0
+                async for chunk in response.aiter_bytes():
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        raise CaptureError(
+                            "The screenshot is too large to send through Telegram."
+                        )
+                    chunks.append(chunk)
+                image = b"".join(chunks)
+                if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise CaptureError("ApiFlash returned an invalid PNG screenshot.")
+    except CaptureError:
+        raise
+    except httpx.TimeoutException as exc:
+        raise CaptureError("ApiFlash timed out while capturing this website.") from exc
+    except httpx.HTTPError as exc:
+        raise CaptureError(
+            f"Could not reach the ApiFlash screenshot service ({type(exc).__name__})."
+        ) from exc
+
+    hostname = urlparse(url).hostname or "Website"
+    return image, hostname[:250], "Website screenshot captured with ApiFlash."
 
 
 async def capture_web(

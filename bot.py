@@ -30,7 +30,7 @@ from aiogram.types import (
 
 from app_settings import Settings
 from billing import SendRecurringStarsInvoice
-from capture import CaptureError, capture_web, render_file
+from capture import CaptureError, capture_web, capture_website_apiflash, render_file
 from health_server import HealthServer, self_ping_loop
 from miniapp import MiniAppError, authenticated_webview_url, parse_miniapp_link
 from storage import Store
@@ -693,10 +693,13 @@ async def _process_link(message: Message, raw_url: str) -> None:
                 "That is a Telegram bot/chat link, not a normal web page. I cannot capture a native Telegram screen without an approved Mini App capture setup."
             )
         return
-    await message.answer("Opening the website and preparing a screenshot…")
+    await message.answer("Asking ApiFlash to capture the website…")
     try:
-        image, title, description = await capture_web(
-            raw_url, settings.page_timeout_seconds, settings.max_screenshot_bytes
+        image, title, description = await capture_website_apiflash(
+            raw_url,
+            settings.apiflash_api_key,
+            settings.page_timeout_seconds,
+            settings.max_screenshot_bytes,
         )
         await _send_preview(message, image, title, description)
     except CaptureError as exc:
@@ -704,7 +707,7 @@ async def _process_link(message: Message, raw_url: str) -> None:
     except Exception as exc:
         log.warning("website capture failed error=%s", type(exc).__name__)
         await message.answer(
-            "The screenshot could not be generated. The site may block automated browsers or require sign-in."
+            "ApiFlash could not generate the screenshot. The site may block the service, require sign-in, or the provider may be temporarily unavailable."
         )
 
 
@@ -798,6 +801,15 @@ async def text_message(message: Message) -> None:
     text = (message.text or "").strip()
     url = _safe_url_from_text(text)
     if url:
+        host = (urlparse(url).hostname or "").lower()
+        if (
+            host not in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}
+            and not settings.apiflash_api_key
+        ):
+            await message.answer(
+                "Website screenshots are not configured yet. The owner must add APIFLASH_API_KEY in the Render environment. Your preview was not used."
+            )
+            return
         if not await _preview_or_prompt(message):
             return
         await _process_link(message, url)
@@ -876,9 +888,59 @@ async def owner_help(message: Message) -> None:
     await message.answer(
         "Owner commands:\n"
         "/botstatus — users, subscriptions, credits, uptime, and integrations\n"
+        "/gift <user_id> [days] — gift premium access (30 days by default; can be gifted before the user starts the bot)\n"
         "/message <user_id|@username> <text> — message a registered user, or use the userbot for a public username\n"
         "/broadcast <text> — preview, confirm, then send to registered users\n"
         "Owner access to paid features is free. Bot API recipients must have started the bot; userbot sends can reach public personal usernames."
+    )
+
+
+@dp.message(Command("gift"))
+async def gift_subscription(message: Message, command: CommandObject) -> None:
+    if not await _owner_only(message):
+        return
+    parts = (command.args or "").split()
+    if (
+        len(parts) not in {1, 2}
+        or not re.fullmatch(r"[1-9][0-9]*", parts[0])
+        or len(parts[0]) > 19
+        or int(parts[0]) > 2**63 - 1
+        or (
+            len(parts) == 2
+            and (
+                not re.fullmatch(r"[1-9][0-9]*", parts[1])
+                or len(parts[1]) > 4
+            )
+        )
+    ):
+        await message.answer(
+            "Format: <code>/gift &lt;telegram_user_id&gt; [days]</code>. Days default to 30."
+        )
+        return
+    target_id = int(parts[0])
+    days = int(parts[1]) if len(parts) == 2 else 30
+    if days > 3650:
+        await message.answer("Gift duration must be between 1 and 3650 days.")
+        return
+
+    expires_at = store.gift_subscription(target_id, days * 86_400)
+    expiry_label = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(expires_at))
+    try:
+        await bot.send_message(
+            target_id,
+            f"The bot owner gifted you {days} days of premium access. Your access is active until <code>{expiry_label}</code>. Send /start to use the bot.",
+        )
+        delivery = "The recipient was notified."
+    except TelegramAPIError as exc:
+        log.info(
+            "premium gift notification not delivered target=%s error=%s",
+            target_id,
+            type(exc).__name__,
+        )
+        delivery = "The gift is saved, but Telegram could not notify them; they may need to start the bot first."
+    await message.answer(
+        f"Gifted <b>{days} days</b> of premium access to <code>{target_id}</code>.\n"
+        f"Active until <code>{expiry_label}</code>. {delivery}"
     )
 
 
@@ -903,6 +965,7 @@ async def bot_status(message: Message) -> None:
         f"Active subscriptions: {stats['paid_users']}\n"
         f"Free preview credits available: {stats['free_preview_credits']}\n"
         f"Successful referrals: {stats['referrals']}\n"
+        f"ApiFlash screenshots: {'enabled' if settings.apiflash_api_key else 'not configured'}\n"
         f"Userbot: {'connected' if userbot_service else 'not configured/offline'}\n"
         f"Groq vision: {'enabled' if settings.remote_vision_enabled else 'disabled'}\n"
         f"Database: {database}\n"
@@ -1090,13 +1153,19 @@ async def help_command(message: Message) -> None:
 
 @dp.message(Command("privacy"))
 async def privacy_command(message: Message) -> None:
+    website_notice = (
+        "Public website URLs are sent to ApiFlash to render screenshots; ApiFlash retrieves and processes the requested page. "
+        if settings.apiflash_api_key
+        else "Public website screenshot capture is unavailable until the owner configures ApiFlash. "
+    )
     vision_notice = (
         "Screenshot bytes are sent to Groq for captions when Groq vision is enabled."
         if settings.remote_vision_enabled
         else "AI visual captions are disabled; screenshot bytes are not sent to an AI captioning provider."
     )
     await message.answer(
-        "Website pages are opened in an isolated browser. Uploaded images, PDFs, and text files are downloaded temporarily for preview and deleted after processing; unsupported files are not executed. "
+        website_notice
+        + "Telegram Mini App screenshots are captured locally; their authenticated launch URLs are not sent to ApiFlash. Uploaded images, PDFs, and text files are downloaded temporarily for preview and deleted after processing; unsupported files are not executed. "
         + vision_notice
         + " For /send, your message is sent by the dedicated userbot account, whose identity is visible to the recipient; replies and supported attachments from that chat are forwarded back to you. The reply route can be stopped with /stoprelay and expires after 30 days without activity. For an approved Mini App, the same account opens the app; it may receive the account's Telegram profile/init data. The authenticated launch URL is not returned to you or intentionally logged. Do not send links or files you are not authorized to share."
     )

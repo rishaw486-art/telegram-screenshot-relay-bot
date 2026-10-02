@@ -6,10 +6,10 @@ An MVP Telegram bot that accepts website links and selected files, captures a sc
 
 - Telegram Stars recurring invoice (`XTR`, 250 Stars, 30-day subscription); access is granted only on Telegram's successful-payment update.
 - `/buy`, `/status`, `/referral`, `/cancel`, `/send @username message`, `/stoprelay`, `/paysupport`, `/help`, `/privacy`.
-- Owner-only `/botstatus`, `/message <user_id|@username> <text>`, `/broadcast <text>` (with a confirmation step), and `/ownerhelp`; owner IDs receive free unlimited access.
+- Owner-only `/botstatus`, `/gift <user_id> [days]`, `/message <user_id|@username> <text>`, `/broadcast <text>` (with a confirmation step), and `/ownerhelp`; owner IDs receive free unlimited access.
 - Owner activity messages for first-time users and confirmed Stars payments.
 - One trial screenshot/preview per newly registered user; each three unique users who start via a referral link grant one more preview credit.
-- Website screenshots using isolated Playwright Chromium, title/metadata/text descriptions, navigation timeouts, DNS/private-network checks, and per-request private-host blocking.
+- Public website screenshots through ApiFlash (full-page PNG), with local URL/DNS checks, request timeouts, and a response-size limit. Telegram Mini App screenshots remain on local Playwright so authenticated launch URLs are not sent to ApiFlash.
 - File previews for images, PDFs (first page), and UTF-8 text/Markdown/CSV/log files. No uploaded file is executed. Unsupported types are rejected.
 - Natural-language visual descriptions through Groq's OpenAI-compatible vision endpoint. With `GROQ_API_KEY` configured, captions are enabled by default unless `ENABLE_REMOTE_VISION=false`; screenshot bytes are sent to Groq.
 - Telegram Mini App capture using an owner-authorized Telethon userbot: inline WebApp buttons via `messages.requestWebView`, direct Mini App links via `messages.getBotApp` + `messages.requestAppWebView`, and owner-configured bot allowlisting. The returned authenticated URL is passed directly to a fresh Playwright context and is never sent to the requester.
@@ -23,6 +23,7 @@ An MVP Telegram bot that accepts website links and selected files, captures a sc
 - Python 3.11+ and Chromium dependencies (the Dockerfile installs them).
 - A bot from [@BotFather](https://t.me/BotFather).
 - The owner's numeric Telegram user ID in `OWNER_IDS` (comma-separated if there are multiple owners).
+- An [ApiFlash](https://apiflash.com/documentation) access key for public website screenshots (`APIFLASH_API_KEY`).
 - A [Groq API key](https://console.groq.com/keys) if enabling AI screenshot captions.
 - For `/send` and Mini App capture: a dedicated Telegram user account authorized by the operator, API ID/hash from [my.telegram.org](https://my.telegram.org), and its Telethon StringSession. Use an account that is not the operator's primary account. Each Mini App bot must be placed in `MINIAPP_ALLOWED_BOTS` before its Mini App may receive that account's Telegram identity.
 - A GitHub repository for source control. Never commit `.env`, session strings, `.session` files, databases, or screenshots.
@@ -31,7 +32,7 @@ An MVP Telegram bot that accepts website links and selected files, captures a sc
 
 ```bash
 cp .env.example .env
-# Fill TELEGRAM_BOT_TOKEN, BOT_USERNAME, OWNER_IDS, and the required deployment values in .env
+# Fill TELEGRAM_BOT_TOKEN, BOT_USERNAME, OWNER_IDS, APIFLASH_API_KEY, and the required deployment values in .env
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -63,6 +64,7 @@ Set these required Render environment variables/secrets:
 - `TELEGRAM_BOT_TOKEN`
 - `BOT_USERNAME`
 - `OWNER_IDS` — comma-separated numeric Telegram owner IDs
+- `APIFLASH_API_KEY` — ApiFlash access key for website screenshots
 - `TURSO_DATABASE_URL` — your Turso database URL (commonly `libsql://...`)
 - `TURSO_AUTH_TOKEN` — a database-scoped auth token
 - `GROQ_API_KEY` — required for Groq screenshot captions
@@ -75,7 +77,7 @@ The optional userbot variables (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRA
 
 ## Owner, trial and referral features
 
-Set `OWNER_IDS` to the bot owner's numeric Telegram user ID(s). Each owner must start the bot once to receive notifications. Owners receive free, unlimited access to paid-gated bot features and receive notifications when a new user starts or a Stars payment is confirmed. `/botstatus` shows service/user/subscription/referral counts and integrations. `/message <user_id|@username> <text>` sends through the Bot API to registered users; if a public username has not started the bot, it falls back to the configured userbot account and routes replies to the owner. `/broadcast <text>` previews the content and recipient count, then requires an explicit confirmation before sending to registered users; it skips owner IDs and reports delivery results.
+Set `OWNER_IDS` to the bot owner's numeric Telegram user ID(s). Each owner must start the bot once to receive notifications. Owners receive free, unlimited access to paid-gated bot features and receive notifications when a new user starts or a Stars payment is confirmed. `/botstatus` shows service/user/subscription/referral counts and integrations. `/gift <user_id> [days]` grants a default 30 days (up to 3650 days) to any numeric Telegram user ID; gifts stack after existing access and can be granted before the recipient starts the bot. The bot attempts to notify the recipient, but Telegram may require them to start the bot first. `/message <user_id|@username> <text>` sends through the Bot API to registered users; if a public username has not started the bot, it falls back to the configured userbot account and routes replies to the owner. `/broadcast <text>` previews the content and recipient count, then requires an explicit confirmation before sending to registered users; it skips owner IDs and reports delivery results.
 
 Telegram's Bot API cannot initiate a chat with an arbitrary username. Broadcast recipients and Bot API `/message` recipients must have started the bot previously. `/message @username ...` can instead use the configured userbot for a public personal account that has not started the bot; the recipient sees the userbot account's identity and replies are routed to the owner. Numeric-ID `/message` requires a registered bot user.
 
@@ -99,7 +101,7 @@ The bot sends screenshot bytes—including previews made from user-uploaded file
 4. Put approved bot usernames (without `@`) in `MINIAPP_ALLOWED_BOTS`, comma-separated.
 5. Restart the service. The recipient will see and reply to this connected account, not to a hidden relay identity. Before enabling an additional Mini App, confirm the dedicated account may disclose its Telegram basic profile to that app.
 
-The Mini App URL/auth payload is sensitive. The code does not persist or log it. The initial render is captured only; the worker does not click app controls, submit forms, or make payments. Some Mini Apps depend on Telegram-native WebView bridge events and may not work in Playwright.
+The Mini App URL/auth payload is sensitive. The code does not persist or log it or send it to ApiFlash. The initial render is captured locally only; the worker does not click app controls, submit forms, or make payments. Some Mini Apps depend on Telegram-native WebView bridge events and may not work in Playwright.
 
 ## Relay behavior
 
@@ -110,7 +112,7 @@ The original opt-in `/relay @username message` command remains available when bo
 ## Security and limitations
 
 - This is an MVP, not a production audit. Before broad launch, add abuse reporting/block lists, strict per-user rate limits, payment dispute operations/refund workflow, database backups, structured metrics, and human moderation.
-- Web capture is untrusted remote browsing. Keep the worker isolated, update Chromium regularly, and test SSRF protections on the target host/network. The bot rejects local/private addresses; websites can still change content or block automation.
+- Website captures send the URL to ApiFlash, which retrieves and renders the page; do not submit URLs you are not authorized to share. The app does not send custom cookies, authentication headers, scripts, or proxies. A site may still block the screenshot provider; use capture only where automated access is permitted.
 - Current file support is images, PDFs, and text-like documents. Office, archive, and executable formats are intentionally unsupported.
 - `/send` supports public personal accounts, not bots or channels. The account connected as the userbot is visible to the recipient; Telegram privacy and anti-spam checks can still reject delivery.
 - The userbot requires the account owner's authorization and is used for both `/send` and approved Mini App access. No owner session is bundled in the repository.

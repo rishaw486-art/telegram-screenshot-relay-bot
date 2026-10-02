@@ -71,6 +71,11 @@ class Store:
                     free_uses INTEGER NOT NULL DEFAULT 0,
                     created_at INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS owner_gifts (
+                    user_id INTEGER PRIMARY KEY,
+                    paid_until INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS relay_requests (
                     token TEXT PRIMARY KEY,
                     sender_id INTEGER NOT NULL,
@@ -234,7 +239,18 @@ class Store:
         with self._connect() as db:
             users = db.execute("SELECT COUNT(*) AS count FROM users").fetchone()
             paid = db.execute(
-                "SELECT COUNT(*) AS count FROM users WHERE paid_until>?", (now,)
+                """
+                SELECT COUNT(*) AS count FROM (
+                    SELECT user_id, MAX(paid_until) AS paid_until
+                    FROM (
+                        SELECT user_id, paid_until FROM users
+                        UNION ALL
+                        SELECT user_id, paid_until FROM owner_gifts
+                    )
+                    GROUP BY user_id
+                ) WHERE paid_until>?
+                """,
+                (now,),
             ).fetchone()
             credits = db.execute(
                 "SELECT COALESCE(SUM(free_uses),0) AS count FROM users"
@@ -248,18 +264,58 @@ class Store:
             }
 
     def is_paid(self, user_id: int) -> bool:
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT paid_until FROM users WHERE user_id=?", (user_id,)
-            ).fetchone()
-            return bool(row and int(row["paid_until"]) > int(time.time()))
+        return self.paid_until(user_id) > int(time.time())
 
     def paid_until(self, user_id: int) -> int:
         with self._connect() as db:
             row = db.execute(
-                "SELECT paid_until FROM users WHERE user_id=?", (user_id,)
+                """
+                SELECT MAX(
+                    COALESCE((SELECT paid_until FROM users WHERE user_id=?), 0),
+                    COALESCE((SELECT paid_until FROM owner_gifts WHERE user_id=?), 0)
+                ) AS paid_until
+                """,
+                (user_id, user_id),
             ).fetchone()
-            return int(row["paid_until"]) if row else 0
+            return int(row["paid_until"] or 0) if row else 0
+
+    def gift_subscription(self, user_id: int, duration_seconds: int) -> int:
+        """Add an owner gift after the later of current access expiry or now."""
+        if user_id <= 0 or duration_seconds <= 0:
+            raise ValueError("user_id and duration_seconds must be positive")
+        now = int(time.time())
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO owner_gifts(user_id, paid_until, updated_at)
+                VALUES(
+                    ?,
+                    MAX(COALESCE((SELECT paid_until FROM users WHERE user_id=?), 0), ?) + ?,
+                    ?
+                )
+                ON CONFLICT(user_id) DO UPDATE SET
+                    paid_until=MAX(
+                        owner_gifts.paid_until,
+                        COALESCE((SELECT paid_until FROM users WHERE user_id=?), 0),
+                        ?
+                    ) + ?,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    user_id,
+                    user_id,
+                    now,
+                    duration_seconds,
+                    now,
+                    user_id,
+                    now,
+                    duration_seconds,
+                ),
+            )
+            row = db.execute(
+                "SELECT paid_until FROM owner_gifts WHERE user_id=?", (user_id,)
+            ).fetchone()
+            return int(row["paid_until"])
 
     def grant_subscription(self, user_id: int, paid_until: int, charge_id: str) -> None:
         with self._connect() as db:

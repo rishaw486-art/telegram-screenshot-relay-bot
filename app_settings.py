@@ -54,6 +54,7 @@ class Settings:
     max_upload_bytes: int
     max_screenshot_bytes: int
     page_timeout_seconds: int
+    apiflash_api_key: str | None
     api_id: int | None
     api_hash: str | None
     userbot_session: str | None
@@ -119,6 +120,7 @@ class Settings:
             max_upload_bytes=_int_env("MAX_UPLOAD_BYTES", 15 * 1024 * 1024),
             max_screenshot_bytes=_int_env("MAX_SCREENSHOT_BYTES", 9_000_000),
             page_timeout_seconds=_int_env("PAGE_TIMEOUT_SECONDS", 25),
+            apiflash_api_key=os.getenv("APIFLASH_API_KEY", "").strip() or None,
             api_id=int(api_id_raw) if api_id_raw else None,
             api_hash=os.getenv("TELEGRAM_API_HASH") or None,
             userbot_session=os.getenv("TELEGRAM_USERBOT_SESSION") or None,
