@@ -1,0 +1,5 @@
+aiogram>=3.22,<4
+playwright>=1.56,<2
+telethon>=1.42,<2
+Pillow>=11,<13
+PyMuPDF>=1.26,<2

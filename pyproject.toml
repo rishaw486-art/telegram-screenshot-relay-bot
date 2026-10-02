@@ -1,0 +1,5 @@
+[project]
+name = "telegram-screenshot-relay-bot"
+version = "0.1.0"
+description = "Telegram bot for safe website/file screenshots, Stars subscriptions, and opt-in message relay"
+requires-python = ">=3.11"

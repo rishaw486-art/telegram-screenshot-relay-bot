@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+data
+*.sqlite3
+*.session
+*.session-journal
+screenshots
