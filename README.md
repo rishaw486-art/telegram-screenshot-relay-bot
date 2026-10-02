@@ -1,14 +1,17 @@
 # Telegram Screenshot & Relay Bot
 
-An MVP Telegram bot that accepts website links and selected files, captures a screenshot/preview with a short description, charges **250 Telegram Stars for 30 days**, and offers an **opt-in-only** two-way message relay.
+An MVP Telegram bot that accepts website links and selected files, captures a screenshot/preview with a short description, offers **one free preview to new users** and **one more for every three successful referrals**, and charges **250 Telegram Stars for 30 days** for unlimited access and messaging features.
 
 ## Features implemented
 
 - Telegram Stars recurring invoice (`XTR`, 250 Stars, 30-day subscription); access is granted only on Telegram's successful-payment update.
-- `/buy`, `/status`, `/cancel`, `/send @username message`, `/stoprelay`, `/paysupport`, `/help`, `/privacy`.
+- `/buy`, `/status`, `/referral`, `/cancel`, `/send @username message`, `/stoprelay`, `/paysupport`, `/help`, `/privacy`.
+- Owner-only `/botstatus`, `/message <user_id|@username> <text>`, `/broadcast <text>` (with a confirmation step), and `/ownerhelp`; owner IDs receive free unlimited access.
+- Owner activity messages for first-time users and confirmed Stars payments.
+- One trial screenshot/preview per newly registered user; each three unique users who start via a referral link grant one more preview credit.
 - Website screenshots using isolated Playwright Chromium, title/metadata/text descriptions, navigation timeouts, DNS/private-network checks, and per-request private-host blocking.
 - File previews for images, PDFs (first page), and UTF-8 text/Markdown/CSV/log files. No uploaded file is executed. Unsupported types are rejected.
-- Optional natural-language visual descriptions through an OpenAI-compatible vision API. This is **off by default**; enabling it transmits screenshots (including uploaded image/file previews) to the configured provider and may incur separate API charges.
+- Natural-language visual descriptions through Groq's OpenAI-compatible vision endpoint. With `GROQ_API_KEY` configured, captions are enabled by default unless `ENABLE_REMOTE_VISION=false`; screenshot bytes are sent to Groq.
 - Telegram Mini App capture using an owner-authorized Telethon userbot: inline WebApp buttons via `messages.requestWebView`, direct Mini App links via `messages.getBotApp` + `messages.requestAppWebView`, and owner-configured bot allowlisting. The returned authenticated URL is passed directly to a fresh Playwright context and is never sent to the requester.
 - `/send @username message` resolves a public personal username and sends from the operator's connected userbot account; the recipient does not need to start this bot. Replies from that account's chat are returned to the requesting bot user.
 - Optional `/relay @username message` remains a separate bot-mediated mode that requires the recipient to start the bot and explicitly accept; both parties need active subscriptions.
@@ -19,6 +22,8 @@ An MVP Telegram bot that accepts website links and selected files, captures a sc
 
 - Python 3.11+ and Chromium dependencies (the Dockerfile installs them).
 - A bot from [@BotFather](https://t.me/BotFather).
+- The owner's numeric Telegram user ID in `OWNER_IDS` (comma-separated if there are multiple owners).
+- A [Groq API key](https://console.groq.com/keys) if enabling AI screenshot captions.
 - For `/send` and Mini App capture: a dedicated Telegram user account authorized by the operator, API ID/hash from [my.telegram.org](https://my.telegram.org), and its Telethon StringSession. Use an account that is not the operator's primary account. Each Mini App bot must be placed in `MINIAPP_ALLOWED_BOTS` before its Mini App may receive that account's Telegram identity.
 - A GitHub repository for source control. Never commit `.env`, session strings, `.session` files, databases, or screenshots.
 
@@ -26,7 +31,7 @@ An MVP Telegram bot that accepts website links and selected files, captures a sc
 
 ```bash
 cp .env.example .env
-# Fill TELEGRAM_BOT_TOKEN and BOT_USERNAME in .env
+# Fill TELEGRAM_BOT_TOKEN, BOT_USERNAME, OWNER_IDS, and the required deployment values in .env
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
@@ -57,8 +62,10 @@ Set these required Render environment variables/secrets:
 
 - `TELEGRAM_BOT_TOKEN`
 - `BOT_USERNAME`
+- `OWNER_IDS` — comma-separated numeric Telegram owner IDs
 - `TURSO_DATABASE_URL` — your Turso database URL (commonly `libsql://...`)
 - `TURSO_AUTH_TOKEN` — a database-scoped auth token
+- `GROQ_API_KEY` — required for Groq screenshot captions
 
 The app uses Turso's current remote Python driver, `turso_serverless`, which supports Turso/libSQL URLs and the existing SQLite-style schema. It creates or migrates the tables at startup. The app intentionally refuses to start on Render without both Turso variables, rather than silently writing user/payment data to an ephemeral local file. Local SQLite remains available for development. Create the Turso database and auth token in Turso, then set both values in Render's secret environment settings; do not commit the token.
 
@@ -66,15 +73,23 @@ Self-pinging is enabled by default when `RENDER_EXTERNAL_URL` is present. The se
 
 The optional userbot variables (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_USERBOT_SESSION`) can also be added to Render if using `/send` and Mini App capture.
 
+## Owner, trial and referral features
+
+Set `OWNER_IDS` to the bot owner's numeric Telegram user ID(s). Each owner must start the bot once to receive notifications. Owners receive free, unlimited access to paid-gated bot features and receive notifications when a new user starts or a Stars payment is confirmed. `/botstatus` shows service/user/subscription/referral counts and integrations. `/message <user_id|@username> <text>` sends through the Bot API to registered users; if a public username has not started the bot, it falls back to the configured userbot account and routes replies to the owner. `/broadcast <text>` previews the content and recipient count, then requires an explicit confirmation before sending to registered users; it skips owner IDs and reports delivery results.
+
+Telegram's Bot API cannot initiate a chat with an arbitrary username. Broadcast recipients and Bot API `/message` recipients must have started the bot previously. `/message @username ...` can instead use the configured userbot for a public personal account that has not started the bot; the recipient sees the userbot account's identity and replies are routed to the owner. Numeric-ID `/message` requires a registered bot user.
+
+Each first-time user gets **one screenshot/preview attempt** for a website, supported file, or approved Mini App. `/referral` creates a deep link. A referral counts only when a unique, previously unregistered person starts the bot through that link; every third valid referral adds one preview credit to the inviter. Direct `/send` and `/relay` messaging still require a subscription, except for configured owners. Free preview/referral credits do not expire in the current implementation.
+
 ## Configure Telegram Stars
 
 The bot sends a digital-service invoice with `currency="XTR"`, 250 Stars, an empty provider token, and `subscription_period=2592000`. It approves only the matching pre-checkout payload, amount, and currency; subscription access is then updated from `successful_payment`. Telegram requires digital goods/services sold inside Telegram to use Stars. The bot retains the Telegram charge ID for subscription cancellation/support.
 
 Set `SUPPORT_ADMIN_IDS` to one or more comma-separated numeric owner/support IDs if support messages should be escalated. `/paysupport` remains available without a subscription.
 
-## Optional visual captions
+## Groq visual captions
 
-The bot can request a natural-language caption for any screenshot through an OpenAI-compatible vision API. This is **disabled by default**. To opt in, set `ENABLE_REMOTE_VISION=true`, `VISION_API_KEY`, and (if needed) `VISION_API_BASE` / `VISION_MODEL` in the deployment's secret/config settings. When enabled, screenshot bytes—including previews made from user-uploaded files—are transmitted to that provider and may incur separate usage charges. `/privacy` describes this behavior to bot users.
+The bot sends screenshot bytes—including previews made from user-uploaded files—to Groq when `GROQ_API_KEY` is configured and remote vision is enabled. Configure `GROQ_API_KEY`; `GROQ_MODEL` defaults to `qwen/qwen3.8-27b`. Set `ENABLE_REMOTE_VISION=false` to disable this processing. `/privacy` discloses the transfer. Groq currently documents this Qwen vision model as a **Preview** model; its availability and limits can change. The current free-plan limits table lists 30 RPM, 1,000 RPD, 8,000 TPM and 200,000 TPD for Qwen3.8-27B; check your [Groq limits page](https://console.groq.com/settings/limits) and [pricing/model page](https://console.groq.com/docs/model/qwen/qwen3.8-27b) for your account's current terms. The API returns a rate-limit error when a limit is reached; the bot then falls back to the normal page/file description.
 
 ## Configure the userbot messaging and Mini App capture
 
@@ -116,3 +131,6 @@ The original opt-in `/relay @username message` command remains available when bo
 - [Render health checks](https://render.com/docs/health-checks)
 - [Render Free instance limitations](https://render.com/docs/free#free-web-services)
 - [Turso Python quickstart](https://docs.turso.tech/sdk/python/quickstart)
+- [Groq vision input guide](https://console.groq.com/docs/vision)
+- [Groq supported models](https://console.groq.com/docs/models)
+- [Groq rate limits](https://console.groq.com/docs/rate-limits)

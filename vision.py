@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import logging
 
 import httpx
 
 from app_settings import Settings
+
+log = logging.getLogger("groq_vision")
 
 
 async def describe_image(image_bytes: bytes, settings: Settings) -> str | None:
@@ -31,7 +34,8 @@ async def describe_image(image_bytes: bytes, settings: Settings) -> str | None:
                 ],
             }
         ],
-        "max_tokens": 180,
+        "max_completion_tokens": 180,
+        "temperature": 0.7,
     }
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
@@ -44,5 +48,9 @@ async def describe_image(image_bytes: bytes, settings: Settings) -> str | None:
             )
         text = " ".join(str(content).split())[:700]
         return text or None
-    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
+    except httpx.HTTPStatusError as exc:
+        log.warning("vision provider returned HTTP %s", exc.response.status_code)
+        return None
+    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+        log.warning("vision caption failed error=%s", type(exc).__name__)
         return None

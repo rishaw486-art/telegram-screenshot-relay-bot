@@ -12,7 +12,12 @@ from urllib.parse import urlparse
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BufferedInputFile,
@@ -51,7 +56,9 @@ store = Store(
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 awaiting_support: set[int] = set()
+pending_broadcasts: dict[int, str] = {}
 userbot_service: UserbotService | None = None
+BOT_STARTED_AT = time.time()
 
 
 def _user_tag(message: Message) -> str:
@@ -77,12 +84,52 @@ async def _paid_or_prompt(message: Message) -> bool:
         )
         return False
     store.register(message.from_user.id, message.from_user.username)
-    if not store.is_paid(message.from_user.id):
+    if message.from_user.id in settings.owner_ids or store.is_paid(
+        message.from_user.id
+    ):
+        return True
+    await message.answer(
+        "This feature requires an active 250-Star / 30-day subscription. Free trial/referral credits are for screenshot previews. Use /buy to subscribe or /referral to earn another preview."
+    )
+    return False
+
+
+def _has_paid_or_owner(user_id: int) -> bool:
+    return user_id in settings.owner_ids or store.is_paid(user_id)
+
+
+async def _preview_or_prompt(message: Message) -> bool:
+    if not message.from_user:
         await message.answer(
-            "This feature needs an active 250-Star / 30-day subscription. Use /buy to subscribe or /status to check access."
+            "I could not identify your Telegram account. Please try in a private chat with me."
         )
         return False
+    user_id = message.from_user.id
+    store.register(user_id, message.from_user.username)
+    if _has_paid_or_owner(user_id):
+        return True
+    remaining = store.consume_free_use(user_id)
+    if remaining is None:
+        await message.answer(
+            "Your free screenshot preview has been used. Invite 3 new people with /referral to earn another preview, or use /buy for 250 Stars / 30 days."
+        )
+        return False
+    await message.answer(
+        f"Using a free screenshot preview. Remaining free previews: {remaining}. Invite 3 new users with /referral for another, or use /buy for unlimited access."
+    )
     return True
+
+
+async def _notify_owners(text: str) -> None:
+    for owner_id in settings.owner_ids:
+        try:
+            await bot.send_message(owner_id, text)
+        except TelegramAPIError as exc:
+            log.info(
+                "owner activity notification not delivered owner=%s error=%s",
+                owner_id,
+                type(exc).__name__,
+            )
 
 
 async def _send_preview(
@@ -105,8 +152,48 @@ def _escape(value: str) -> str:
 async def start(message: Message, command: CommandObject) -> None:
     if not message.from_user:
         return
-    store.register(message.from_user.id, message.from_user.username)
+    user_id = message.from_user.id
+    is_new_user = store.register(user_id, message.from_user.username)
     args = (command.args or "").strip()
+    referral_text = ""
+    referrer_id: int | None = None
+    if args.startswith("ref_") and is_new_user:
+        raw_referrer = args.removeprefix("ref_")
+        if raw_referrer.isdigit():
+            referrer_id = int(raw_referrer)
+            referral = store.record_referral(user_id, referrer_id)
+            if referral:
+                if referral["rewarded"]:
+                    referral_text = "This invite counts as a referral. Your inviter earned one free preview credit."
+                    referrer_notice = (
+                        f"Referral milestone reached: 3 new users have started through your link. "
+                        f"You earned 1 free screenshot preview; available credits: {referral['free_uses']}."
+                    )
+                else:
+                    referral_text = "This invite counts as a referral."
+                    referrer_notice = (
+                        f"A new user started through your referral link. "
+                        f"Progress: {referral['referral_count'] % 3}/3 toward another free preview."
+                    )
+                try:
+                    await bot.send_message(referrer_id, referrer_notice)
+                except TelegramAPIError as exc:
+                    log.info(
+                        "referral notification not delivered user=%s error=%s",
+                        referrer_id,
+                        type(exc).__name__,
+                    )
+    if is_new_user:
+        username = (
+            f"@{_escape(message.from_user.username)}"
+            if message.from_user.username
+            else "no username"
+        )
+        referred = f"\nReferrer ID: <code>{referrer_id}</code>" if referrer_id else ""
+        await _notify_owners(
+            f"New user started the bot\nName: {_escape(message.from_user.full_name)}"
+            f"\nUsername: {username}\nUser ID: <code>{user_id}</code>{referred}"
+        )
     if args.startswith("relay_"):
         token = args.removeprefix("relay_")
         request = store.request(token)
@@ -141,15 +228,30 @@ async def start(message: Message, command: CommandObject) -> None:
             ),
         )
         return
+    if args.startswith("ref_") and not is_new_user:
+        await message.answer(
+            "Welcome back. Referral rewards are counted only when a new user starts the bot for the first time. Use /referral to get your own link."
+        )
+        return
+    if is_new_user:
+        await message.answer(
+            "Welcome! You have one free screenshot preview. Invite 3 new users with /referral to earn one more preview. Use /buy for unlimited access.\n\n"
+            "Send a website link, supported file, or approved Mini App to use your preview."
+            + (f"\n\n{referral_text}" if referral_text else "")
+        )
+        return
     await message.answer(
         "Hi! I can capture screenshots and short descriptions of public websites, supported files, "
-        "and approved Telegram Mini Apps. Use /buy to unlock the paid features.\n\n"
-        "Commands: /buy, /status, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy."
+        "and approved Telegram Mini Apps. Use /buy to unlock paid features or /referral to earn free screenshot previews.\n\n"
+        "Commands: /buy, /status, /referral, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy."
     )
 
 
 @dp.message(Command("buy"))
 async def buy(message: Message) -> None:
+    if message.from_user and message.from_user.id in settings.owner_ids:
+        await message.answer("Owner access is free and unlimited.")
+        return
     await bot(
         SendRecurringStarsInvoice(
             chat_id=message.chat.id,
@@ -172,15 +274,43 @@ async def status(message: Message) -> None:
     if not message.from_user:
         return
     store.register(message.from_user.id, message.from_user.username)
+    if message.from_user.id in settings.owner_ids:
+        await message.answer("Owner access is free and unlimited.")
+        return
     exp = store.paid_until(message.from_user.id)
     if exp > int(time.time()):
         await message.answer(
             f"Your subscription is active until <code>{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(exp))}</code>."
         )
     else:
+        credits = store.referral_stats(message.from_user.id)
         await message.answer(
-            "Your subscription is inactive or expired. Use /buy to subscribe for 250 Stars per 30 days."
+            f"Your subscription is inactive or expired. Free screenshot previews remaining: {credits['free_uses']}. "
+            f"Successful referrals: {credits['referral_count']} ({credits['referral_count'] % 3}/3 toward the next preview). "
+            "Use /referral or /buy to subscribe for 250 Stars per 30 days."
         )
+
+
+@dp.message(Command("referral", "refer"))
+async def referral_command(message: Message) -> None:
+    if not message.from_user:
+        return
+    store.register(message.from_user.id, message.from_user.username)
+    referral = store.referral_stats(message.from_user.id)
+    link = f"https://t.me/{settings.bot_username}?start=ref_{message.from_user.id}"
+    if message.from_user.id in settings.owner_ids:
+        await message.answer(
+            f"Owner access is free and unlimited. Your referral link:\n{link}"
+        )
+        return
+    await message.answer(
+        f"Invite 3 new people to start the bot using your link and earn 1 free screenshot preview.\n\n"
+        f"Your link:\n{link}\n\n"
+        f"Successful referrals: {referral['referral_count']} "
+        f"({referral['referral_count'] % 3}/3 toward the next preview).\n"
+        f"Free previews available: {referral['free_uses']}\n"
+        "Only first-time users count."
+    )
 
 
 @dp.message(Command("cancel"))
@@ -263,6 +393,16 @@ async def successful_payment(message: Message) -> None:
     store.register(message.from_user.id, message.from_user.username)
     store.grant_subscription(
         message.from_user.id, expiration, payment.telegram_payment_charge_id
+    )
+    username = (
+        f"@{_escape(message.from_user.username)}"
+        if message.from_user.username
+        else "no username"
+    )
+    await _notify_owners(
+        f"Stars payment received\nUser: {username}\nUser ID: <code>{message.from_user.id}</code>"
+        f"\nAmount: {payment.total_amount} {payment.currency}"
+        f"\nAccess until: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(expiration))}"
     )
     await message.answer(
         f"Payment confirmed. Your access is active until <code>{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(expiration))}</code>. Send a website link or supported file to begin."
@@ -361,7 +501,7 @@ async def relay_command(message: Message, command: CommandObject) -> None:
 @dp.callback_query(F.data.startswith("rel_accept:"))
 async def accept_relay(callback: CallbackQuery) -> None:
     token = callback.data.split(":", 1)[1]
-    if not callback.from_user or not store.is_paid(callback.from_user.id):
+    if not callback.from_user or not _has_paid_or_owner(callback.from_user.id):
         await callback.answer(
             "Subscribe with /buy before accepting a relay.", show_alert=True
         )
@@ -372,7 +512,7 @@ async def accept_relay(callback: CallbackQuery) -> None:
             "This relay request is no longer pending.", show_alert=True
         )
         return
-    if not store.is_paid(request["sender_id"]):
+    if not _has_paid_or_owner(request["sender_id"]):
         await callback.answer(
             "The sender's subscription is no longer active.", show_alert=True
         )
@@ -466,14 +606,14 @@ async def _relay_incoming(message: Message) -> bool:
     peers = store.conversations_for(message.from_user.id)
     if not peers:
         return False
-    if not store.is_paid(message.from_user.id):
+    if not _has_paid_or_owner(message.from_user.id):
         await message.answer(
             "Your subscription has expired, so the relay is paused. Use /buy to renew it."
         )
         return True
     delivered = 0
     for peer in peers:
-        if not store.is_paid(peer):
+        if not _has_paid_or_owner(peer):
             try:
                 await bot.send_message(
                     peer,
@@ -599,7 +739,7 @@ async def _download_file(
 async def photo_message(message: Message) -> None:
     if await _relay_incoming(message):
         return
-    if not await _paid_or_prompt(message):
+    if not await _preview_or_prompt(message):
         return
     photo = message.photo[-1]
     await message.answer("Preparing an image preview…")
@@ -610,7 +750,7 @@ async def photo_message(message: Message) -> None:
 async def document_message(message: Message) -> None:
     if await _relay_incoming(message):
         return
-    if not await _paid_or_prompt(message):
+    if not await _preview_or_prompt(message):
         return
     document = message.document
     if not document:
@@ -625,14 +765,12 @@ async def document_message(message: Message) -> None:
 async def unsupported_media_message(message: Message) -> None:
     if await _relay_incoming(message):
         return
-    if not await _paid_or_prompt(message):
-        return
     await message.answer(
         "I received this media, but screenshot previews currently support images, PDFs, and text files. This file was not executed or retained."
     )
 
 
-@dp.message(F.text)
+@dp.message(F.text & ~F.text.startswith("/"))
 async def text_message(message: Message) -> None:
     if not message.from_user:
         return
@@ -657,15 +795,23 @@ async def text_message(message: Message) -> None:
         return
     if await _relay_incoming(message):
         return
-    if not await _paid_or_prompt(message):
-        return
-    url = _safe_url_from_text(message.text or "")
+    text = (message.text or "").strip()
+    url = _safe_url_from_text(text)
     if url:
+        if not await _preview_or_prompt(message):
+            return
         await _process_link(message, url)
         return
-    text = (message.text or "").strip()
     if text.startswith("@"):
-        username = text[1:].split()[0].lower()
+        username_parts = text[1:].split(maxsplit=1)
+        username = username_parts[0].lower() if username_parts else ""
+        if not re.fullmatch(r"[a-z0-9_]{5,32}", username):
+            await message.answer(
+                "Send a valid Telegram username, website URL, or supported file."
+            )
+            return
+        if not await _preview_or_prompt(message):
+            return
         if (
             username in settings.miniapp_allowed_bots
             and settings.miniapp_capture_enabled
@@ -707,21 +853,252 @@ async def text_message(message: Message) -> None:
             )
         return
     await message.answer(
-        "Send me an http(s) website link, an approved Telegram Mini App link, or a supported image/PDF/text file. Use /help for commands."
+        "Send me an http(s) website link, an approved Telegram Mini App link, or a supported image/PDF/text file. New users get one free screenshot preview; use /referral for another. Use /help for commands."
     )
+
+
+async def _owner_only(message: Message) -> bool:
+    if not message.from_user or message.from_user.id not in settings.owner_ids:
+        await message.answer("This command is restricted to the configured bot owner.")
+        return False
+    if message.chat.type != "private":
+        await message.answer(
+            "Please use owner commands in a private chat with the bot."
+        )
+        return False
+    return True
+
+
+@dp.message(Command("ownerhelp"))
+async def owner_help(message: Message) -> None:
+    if not await _owner_only(message):
+        return
+    await message.answer(
+        "Owner commands:\n"
+        "/botstatus — users, subscriptions, credits, uptime, and integrations\n"
+        "/message <user_id|@username> <text> — message a registered user, or use the userbot for a public username\n"
+        "/broadcast <text> — preview, confirm, then send to registered users\n"
+        "Owner access to paid features is free. Bot API recipients must have started the bot; userbot sends can reach public personal usernames."
+    )
+
+
+@dp.message(Command("botstatus"))
+async def bot_status(message: Message) -> None:
+    if not await _owner_only(message):
+        return
+    stats = store.stats()
+    elapsed = max(0, int(time.time() - BOT_STARTED_AT))
+    days, remainder = divmod(elapsed, 86_400)
+    hours, remainder = divmod(remainder, 3_600)
+    minutes, seconds = divmod(remainder, 60)
+    database = "Turso/libSQL" if settings.turso_database_url else "local SQLite"
+    ping = (
+        "enabled"
+        if settings.self_ping_enabled and settings.render_external_url
+        else "disabled"
+    )
+    await message.answer(
+        "<b>Bot status</b>\n"
+        f"Users: {stats['users']}\n"
+        f"Active subscriptions: {stats['paid_users']}\n"
+        f"Free preview credits available: {stats['free_preview_credits']}\n"
+        f"Successful referrals: {stats['referrals']}\n"
+        f"Userbot: {'connected' if userbot_service else 'not configured/offline'}\n"
+        f"Groq vision: {'enabled' if settings.remote_vision_enabled else 'disabled'}\n"
+        f"Database: {database}\n"
+        f"Render self-ping: {ping}\n"
+        f"Uptime: {days}d {hours}h {minutes}m {seconds}s"
+    )
+
+
+@dp.message(Command("message"))
+async def owner_message_user(message: Message, command: CommandObject) -> None:
+    if not await _owner_only(message):
+        return
+    parts = (command.args or "").split(maxsplit=1)
+    if len(parts) != 2 or len(_escape(parts[1])) > 3500:
+        await message.answer(
+            "Format: <code>/message &lt;user_id|@username&gt; your message</code> (up to 3500 characters)."
+        )
+        return
+    target, text = parts[0], parts[1].strip()
+    if target.lstrip("@").isdigit():
+        target_id = int(target.lstrip("@"))
+        if not store.user_exists(target_id):
+            await message.answer(
+                "That user has not started this bot, so the Bot API cannot message them. Use a public @username with the configured userbot, or ask them to start the bot first."
+            )
+            return
+    else:
+        username = target.strip().lstrip("@").lower()
+        target_id = store.find_user_by_username(username)
+        if not target_id:
+            if userbot_service is None:
+                await message.answer(
+                    "That username has not started this bot. Configure the userbot to contact public usernames, or ask the user to start the bot first."
+                )
+                return
+            try:
+                account_label = await userbot_service.send_to_username(
+                    message.from_user.id, username, text
+                )
+            except UserbotSendError as exc:
+                await message.answer(_escape(str(exc)))
+                return
+            await message.answer(
+                f"Sent to @{_escape(username)} from {account_label}. The recipient sees that Telegram account's identity; replies will return here. Use /stoprelay to stop reply forwarding."
+            )
+            return
+    try:
+        await bot.send_message(
+            target_id, f"<b>Message from the bot owner</b>\n\n{_escape(text)}"
+        )
+    except TelegramAPIError as exc:
+        log.info(
+            "owner direct message failed target=%s error=%s",
+            target_id,
+            type(exc).__name__,
+        )
+        await message.answer(
+            f"Telegram could not deliver the message ({_escape(type(exc).__name__)}). The user may have blocked the bot."
+        )
+        return
+    await message.answer(f"Message delivered to user <code>{target_id}</code>.")
+
+
+@dp.message(Command("broadcast"))
+async def begin_broadcast(message: Message, command: CommandObject) -> None:
+    if not await _owner_only(message):
+        return
+    text = (command.args or "").strip()
+    if not text or len(_escape(text)) > 3500:
+        await message.answer(
+            "Format: <code>/broadcast your message</code> (up to 3500 characters)."
+        )
+        return
+    recipients = [
+        user_id for user_id in store.user_ids() if user_id not in settings.owner_ids
+    ]
+    if not recipients:
+        await message.answer("There are no registered users to receive a broadcast.")
+        return
+    pending_broadcasts[message.from_user.id] = text
+    await message.answer(
+        f"Send this message to {len(recipients)} registered users?\n\n"
+        f"<blockquote>{_escape(text[:500])}</blockquote>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Confirm broadcast",
+                        callback_data="owner_broadcast:confirm",
+                    ),
+                    InlineKeyboardButton(
+                        text="Cancel", callback_data="owner_broadcast:cancel"
+                    ),
+                ]
+            ]
+        ),
+    )
+
+
+@dp.callback_query(F.data.startswith("owner_broadcast:"))
+async def confirm_broadcast(callback: CallbackQuery) -> None:
+    if not callback.from_user or callback.from_user.id not in settings.owner_ids:
+        await callback.answer("Not authorized.", show_alert=True)
+        return
+    owner_id = callback.from_user.id
+    data = callback.data or ""
+    if data.endswith(":cancel"):
+        pending_broadcasts.pop(owner_id, None)
+        await callback.answer("Broadcast canceled.")
+        if callback.message:
+            try:
+                await callback.message.edit_text("Broadcast canceled.")
+            except TelegramBadRequest:
+                pass
+        return
+    text = pending_broadcasts.pop(owner_id, None)
+    if not text:
+        await callback.answer(
+            "No pending broadcast. Send /broadcast again.", show_alert=True
+        )
+        return
+    recipients = [
+        user_id for user_id in store.user_ids() if user_id not in settings.owner_ids
+    ]
+    await callback.answer("Broadcast started.")
+    if callback.message:
+        try:
+            await callback.message.edit_text(
+                f"Broadcast started for {len(recipients)} registered users. I will send you the results when it finishes."
+            )
+        except TelegramBadRequest:
+            pass
+    payload = f"<b>Message from the bot owner</b>\n\n{_escape(text)}"
+    sent = 0
+    failed = 0
+    for user_id in recipients:
+        try:
+            await bot.send_message(user_id, payload)
+            sent += 1
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(min(float(exc.retry_after), 60.0))
+            try:
+                await bot.send_message(user_id, payload)
+                sent += 1
+            except TelegramAPIError as retry_exc:
+                failed += 1
+                log.info(
+                    "broadcast delivery failed user=%s error=%s",
+                    user_id,
+                    type(retry_exc).__name__,
+                )
+        except TelegramAPIError as exc:
+            failed += 1
+            log.info(
+                "broadcast delivery failed user=%s error=%s",
+                user_id,
+                type(exc).__name__,
+            )
+        await asyncio.sleep(0.05)
+    try:
+        await bot.send_message(
+            owner_id,
+            f"Broadcast complete. Delivered: {sent}. Failed/unavailable: {failed}.",
+        )
+    except TelegramAPIError as exc:
+        log.warning(
+            "broadcast summary delivery failed owner=%s error=%s",
+            owner_id,
+            type(exc).__name__,
+        )
 
 
 @dp.message(Command("help"))
 async def help_command(message: Message) -> None:
+    owner_commands = (
+        "\nOwner: /ownerhelp, /botstatus, /message, /broadcast."
+        if message.from_user and message.from_user.id in settings.owner_ids
+        else ""
+    )
     await message.answer(
-        "Send a website URL or supported image/PDF/text file for a screenshot and description.\n\nCommands: /buy, /status, /cancel, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy.\n\n/send sends through the connected userbot account; the recipient does not need to start this bot and replies return here. The recipient sees the userbot account's identity. /relay is a separate opt-in bot-to-bot mode. Mini App capture uses owner-approved bots and the same dedicated userbot."
+        "Send a website URL or supported image/PDF/text file for a screenshot and description. New users get one free screenshot preview; invite 3 new users with /referral to earn another.\n\nCommands: /buy, /status, /referral, /cancel, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy.\n\n/send sends through the connected userbot account; the recipient does not need to start this bot and replies return here. The recipient sees the userbot account's identity. /relay is a separate opt-in bot-to-bot mode. Mini App capture uses owner-approved bots and the same dedicated userbot."
+        + owner_commands
     )
 
 
 @dp.message(Command("privacy"))
 async def privacy_command(message: Message) -> None:
+    vision_notice = (
+        "Screenshot bytes are sent to Groq for captions when Groq vision is enabled."
+        if settings.remote_vision_enabled
+        else "AI visual captions are disabled; screenshot bytes are not sent to an AI captioning provider."
+    )
     await message.answer(
-        "Website pages are opened in an isolated browser. Uploaded images, PDFs, and text files are downloaded temporarily for preview and deleted after processing; unsupported files are not executed. By default, screenshots stay within the bot worker. If the owner explicitly enables remote vision, screenshots are sent to the configured vision provider for captions. For /send, your message is sent by the dedicated userbot account, whose identity is visible to the recipient; replies and supported attachments from that chat are forwarded back to you. The reply route can be stopped with /stoprelay and expires after 30 days without activity. For an approved Mini App, the same account opens the app; it may receive the account's Telegram profile/init data. The authenticated launch URL is not returned to you or intentionally logged. Do not send links or files you are not authorized to share."
+        "Website pages are opened in an isolated browser. Uploaded images, PDFs, and text files are downloaded temporarily for preview and deleted after processing; unsupported files are not executed. "
+        + vision_notice
+        + " For /send, your message is sent by the dedicated userbot account, whose identity is visible to the recipient; replies and supported attachments from that chat are forwarded back to you. The reply route can be stopped with /stoprelay and expires after 30 days without activity. For an approved Mini App, the same account opens the app; it may receive the account's Telegram profile/init data. The authenticated launch URL is not returned to you or intentionally logged. Do not send links or files you are not authorized to share."
     )
 
 

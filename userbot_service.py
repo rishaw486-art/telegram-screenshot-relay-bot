@@ -148,7 +148,9 @@ class UserbotService:
         requester_id = self.store.userbot_requester(int(event.sender_id))
         if not requester_id:
             return
-        if not self.store.is_paid(requester_id):
+        if requester_id not in self.settings.owner_ids and not self.store.is_paid(
+            requester_id
+        ):
             self.store.close_userbot_relay(int(event.sender_id), requester_id)
             try:
                 await self.bot.send_message(

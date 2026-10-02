@@ -6,6 +6,7 @@ import pytest
 
 import health_server
 import storage
+import vision
 from app_settings import Settings
 from health_server import HealthServer
 from miniapp import parse_miniapp_link
@@ -68,6 +69,51 @@ def test_userbot_reply_route_targets_only_one_requester(tmp_path: Path):
     assert store.userbot_requester(700) == 20
 
 
+def test_new_user_has_one_preview_and_every_three_unique_referrals_reward_one(
+    tmp_path: Path,
+):
+    store = Store(tmp_path / "referrals.sqlite3")
+    assert store.register(1, "inviter")
+    assert not store.register(1, "inviter")
+    assert store.consume_free_use(1) == 0
+    assert store.consume_free_use(1) is None
+
+    rewards = []
+    for invitee_id in (2, 3, 4):
+        assert store.register(invitee_id, f"invitee{invitee_id}")
+        rewards.append(store.record_referral(invitee_id, 1))
+    assert [reward["rewarded"] for reward in rewards] == [False, False, True]
+    assert store.record_referral(2, 1) is None
+    assert store.record_referral(1, 1) is None
+    assert store.free_uses(1) == 1
+    assert store.user_exists(1)
+    assert not store.user_exists(999)
+    assert store.referral_stats(1) == {"referral_count": 3, "free_uses": 1}
+    assert store.stats() == {
+        "users": 4,
+        "paid_users": 0,
+        "free_preview_credits": 4,
+        "referrals": 3,
+    }
+
+
+def test_existing_database_migration_does_not_grant_old_users_trial(tmp_path: Path):
+    path = tmp_path / "old.sqlite3"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE users (user_id INTEGER PRIMARY KEY, username TEXT UNIQUE, "
+            "paid_until INTEGER NOT NULL DEFAULT 0, last_charge_id TEXT, updated_at INTEGER NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO users(user_id, username, updated_at) VALUES(7, 'olduser', 10)"
+        )
+    store = Store(path)
+    assert store.register(7, "olduser") is False
+    assert store.free_uses(7) == 0
+    assert store.register(8, "newuser") is True
+    assert store.free_uses(8) == 1
+
+
 def test_remote_vision_requires_explicit_enable_and_api_key(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:fake")
     monkeypatch.setenv("BOT_USERNAME", "testbot")
@@ -77,6 +123,66 @@ def test_remote_vision_requires_explicit_enable_and_api_key(monkeypatch):
     settings = Settings.from_env()
     assert not settings.remote_vision_enabled
     assert asyncio.run(describe_image(b"not-sent", settings)) is None
+
+
+def test_groq_is_default_vision_provider_when_api_key_is_set(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:fake")
+    monkeypatch.setenv("BOT_USERNAME", "testbot")
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.delenv("ENABLE_REMOTE_VISION", raising=False)
+    monkeypatch.delenv("VISION_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.setenv("OWNER_IDS", "101,202")
+    monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
+    monkeypatch.delenv("TURSO_AUTH_TOKEN", raising=False)
+    settings = Settings.from_env()
+    assert settings.remote_vision_enabled
+    assert settings.vision_api_key == "test-groq-key"
+    assert settings.vision_api_base == "https://api.groq.com/openai/v1"
+    assert settings.vision_model == "qwen/qwen3.8-27b"
+    assert settings.owner_ids == frozenset({101, 202})
+
+
+def test_groq_vision_uses_openai_compatible_image_payload(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:fake")
+    monkeypatch.setenv("BOT_USERNAME", "testbot")
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.delenv("ENABLE_REMOTE_VISION", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    settings = Settings.from_env()
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "A sample screenshot."}}]}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, endpoint, *, headers, json):
+            captured.update(endpoint=endpoint, headers=headers, payload=json)
+            return FakeResponse()
+
+    monkeypatch.setattr(vision.httpx, "AsyncClient", FakeClient)
+    result = asyncio.run(describe_image(b"png-bytes", settings))
+    assert result == "A sample screenshot."
+    assert captured["endpoint"] == "https://api.groq.com/openai/v1/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer test-groq-key"
+    payload = captured["payload"]
+    assert payload["model"] == "qwen/qwen3.8-27b"
+    assert payload["max_completion_tokens"] == 180
+    image_url = payload["messages"][0]["content"][1]["image_url"]["url"]
+    assert image_url.startswith("data:image/png;base64,")
 
 
 def test_render_settings_read_port_self_ping_and_turso(monkeypatch):

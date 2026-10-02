@@ -11,10 +11,18 @@ services:
         sync: false
       - key: BOT_USERNAME
         sync: false
+      - key: OWNER_IDS
+        sync: false
       - key: TURSO_DATABASE_URL
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: qwen/qwen3.8-27b
+      - key: ENABLE_REMOTE_VISION
+        value: "true"
       - key: SELF_PING_ENABLED
         value: "true"
       - key: SELF_PING_INTERVAL_SECONDS

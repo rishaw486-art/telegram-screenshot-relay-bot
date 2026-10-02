@@ -20,6 +20,19 @@ def _csv_env(name: str) -> frozenset[str]:
     )
 
 
+def _ids_env(name: str) -> frozenset[int]:
+    try:
+        return frozenset(
+            int(value.strip())
+            for value in os.getenv(name, "").split(",")
+            if value.strip()
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{name} must contain comma-separated numeric Telegram IDs"
+        ) from exc
+
+
 def _bool_env(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -45,6 +58,7 @@ class Settings:
     api_hash: str | None
     userbot_session: str | None
     miniapp_allowed_bots: frozenset[str]
+    owner_ids: frozenset[int]
     support_admin_ids: frozenset[int]
     vision_enabled: bool
     vision_api_key: str | None
@@ -71,12 +85,19 @@ class Settings:
                 "TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required on Render; its local filesystem is ephemeral."
             )
 
+        groq_key = os.getenv("GROQ_API_KEY", "").strip() or None
+        legacy_vision_key = os.getenv("VISION_API_KEY", "").strip() or None
+        vision_key = groq_key or legacy_vision_key
+        if groq_key:
+            vision_api_base = "https://api.groq.com/openai/v1"
+            vision_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+        else:
+            vision_api_base = os.getenv(
+                "VISION_API_BASE", "https://api.openai.com/v1"
+            ).rstrip("/")
+            vision_model = os.getenv("VISION_MODEL", "gpt-4o-mini")
+
         api_id_raw = os.getenv("TELEGRAM_API_ID", "").strip()
-        admins = frozenset(
-            int(value)
-            for value in os.getenv("SUPPORT_ADMIN_IDS", "").split(",")
-            if value.strip()
-        )
         port = _int_env("PORT", 10_000)
         if not 1 <= port <= 65_535:
             raise RuntimeError("PORT must be between 1 and 65535")
@@ -102,13 +123,12 @@ class Settings:
             api_hash=os.getenv("TELEGRAM_API_HASH") or None,
             userbot_session=os.getenv("TELEGRAM_USERBOT_SESSION") or None,
             miniapp_allowed_bots=_csv_env("MINIAPP_ALLOWED_BOTS"),
-            support_admin_ids=admins,
-            vision_enabled=_bool_env("ENABLE_REMOTE_VISION", False),
-            vision_api_key=os.getenv("VISION_API_KEY") or None,
-            vision_api_base=os.getenv(
-                "VISION_API_BASE", "https://api.openai.com/v1"
-            ).rstrip("/"),
-            vision_model=os.getenv("VISION_MODEL", "gpt-4o-mini"),
+            owner_ids=_ids_env("OWNER_IDS"),
+            support_admin_ids=_ids_env("SUPPORT_ADMIN_IDS"),
+            vision_enabled=_bool_env("ENABLE_REMOTE_VISION", bool(groq_key)),
+            vision_api_key=vision_key,
+            vision_api_base=vision_api_base,
+            vision_model=vision_model,
         )
 
     @property

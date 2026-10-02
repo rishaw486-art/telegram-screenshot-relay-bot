@@ -67,7 +67,9 @@ class Store:
                     username TEXT UNIQUE,
                     paid_until INTEGER NOT NULL DEFAULT 0,
                     last_charge_id TEXT,
-                    updated_at INTEGER NOT NULL
+                    updated_at INTEGER NOT NULL,
+                    free_uses INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS relay_requests (
                     token TEXT PRIMARY KEY,
@@ -94,6 +96,11 @@ class Store:
                     active INTEGER NOT NULL DEFAULT 1,
                     last_activity INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS referrals (
+                    invitee_id INTEGER PRIMARY KEY,
+                    referrer_id INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
             """)
             columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(relay_requests)")
@@ -102,17 +109,143 @@ class Store:
                 db.execute(
                     "ALTER TABLE relay_requests ADD COLUMN message_text TEXT NOT NULL DEFAULT ''"
                 )
+            user_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(users)")
+            }
+            if "free_uses" not in user_columns:
+                db.execute(
+                    "ALTER TABLE users ADD COLUMN free_uses INTEGER NOT NULL DEFAULT 0"
+                )
+            if "created_at" not in user_columns:
+                db.execute(
+                    "ALTER TABLE users ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"
+                )
 
-    def register(self, user_id: int, username: str | None) -> None:
+    def register(self, user_id: int, username: str | None) -> bool:
         normalized = username.lower().lstrip("@") if username else None
+        now = int(time.time())
         with self._connect() as db:
-            db.execute(
-                """
-                INSERT INTO users(user_id, username, updated_at) VALUES(?,?,?)
-                ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, updated_at=excluded.updated_at
-            """,
-                (user_id, normalized, int(time.time())),
+            inserted = (
+                db.execute(
+                    """
+                INSERT OR IGNORE INTO users(user_id, username, updated_at, free_uses, created_at)
+                VALUES(?,?,?,1,?)
+                """,
+                    (user_id, normalized, now, now),
+                ).rowcount
+                == 1
             )
+            db.execute(
+                "UPDATE users SET username=?, updated_at=? WHERE user_id=?",
+                (normalized, now, user_id),
+            )
+            return inserted
+
+    def free_uses(self, user_id: int) -> int:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT free_uses FROM users WHERE user_id=?", (user_id,)
+            ).fetchone()
+            return int(row["free_uses"]) if row else 0
+
+    def consume_free_use(self, user_id: int) -> int | None:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                "UPDATE users SET free_uses=free_uses-1, updated_at=? WHERE user_id=? AND free_uses>0",
+                (int(time.time()), user_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = db.execute(
+                "SELECT free_uses FROM users WHERE user_id=?", (user_id,)
+            ).fetchone()
+            return int(row["free_uses"])
+
+    def record_referral(
+        self, invitee_id: int, referrer_id: int
+    ) -> dict[str, Any] | None:
+        if invitee_id == referrer_id:
+            return None
+        now = int(time.time())
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            invitee = db.execute(
+                "SELECT user_id FROM users WHERE user_id=?", (invitee_id,)
+            ).fetchone()
+            referrer = db.execute(
+                "SELECT user_id FROM users WHERE user_id=?", (referrer_id,)
+            ).fetchone()
+            if not invitee or not referrer:
+                return None
+            inserted = db.execute(
+                "INSERT OR IGNORE INTO referrals(invitee_id,referrer_id,created_at) VALUES(?,?,?)",
+                (invitee_id, referrer_id, now),
+            ).rowcount
+            if not inserted:
+                return None
+            count_row = db.execute(
+                "SELECT COUNT(*) AS count FROM referrals WHERE referrer_id=?",
+                (referrer_id,),
+            ).fetchone()
+            count = int(count_row["count"])
+            rewarded = count % 3 == 0
+            if rewarded:
+                db.execute(
+                    "UPDATE users SET free_uses=free_uses+1, updated_at=? WHERE user_id=?",
+                    (now, referrer_id),
+                )
+            credits = db.execute(
+                "SELECT free_uses FROM users WHERE user_id=?", (referrer_id,)
+            ).fetchone()
+            return {
+                "referral_count": count,
+                "rewarded": rewarded,
+                "free_uses": int(credits["free_uses"]),
+            }
+
+    def referral_stats(self, user_id: int) -> dict[str, int]:
+        with self._connect() as db:
+            count = db.execute(
+                "SELECT COUNT(*) AS count FROM referrals WHERE referrer_id=?",
+                (user_id,),
+            ).fetchone()
+            credits = db.execute(
+                "SELECT free_uses FROM users WHERE user_id=?", (user_id,)
+            ).fetchone()
+            return {
+                "referral_count": int(count["count"]),
+                "free_uses": int(credits["free_uses"]) if credits else 0,
+            }
+
+    def user_ids(self) -> list[int]:
+        with self._connect() as db:
+            rows = db.execute("SELECT user_id FROM users ORDER BY user_id").fetchall()
+            return [int(row["user_id"]) for row in rows]
+
+    def user_exists(self, user_id: int) -> bool:
+        with self._connect() as db:
+            return bool(
+                db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone()
+            )
+
+    def stats(self) -> dict[str, int]:
+        now = int(time.time())
+        with self._connect() as db:
+            users = db.execute("SELECT COUNT(*) AS count FROM users").fetchone()
+            paid = db.execute(
+                "SELECT COUNT(*) AS count FROM users WHERE paid_until>?", (now,)
+            ).fetchone()
+            credits = db.execute(
+                "SELECT COALESCE(SUM(free_uses),0) AS count FROM users"
+            ).fetchone()
+            referrals = db.execute("SELECT COUNT(*) AS count FROM referrals").fetchone()
+            return {
+                "users": int(users["count"]),
+                "paid_users": int(paid["count"]),
+                "free_preview_credits": int(credits["count"]),
+                "referrals": int(referrals["count"]),
+            }
 
     def is_paid(self, user_id: int) -> bool:
         with self._connect() as db:
