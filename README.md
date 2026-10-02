@@ -34,7 +34,7 @@ playwright install chromium
 python bot.py
 ```
 
-The bot uses long polling for the MVP. SQLite data is created under `./data/`.
+The bot uses long polling for the MVP. Local development defaults to SQLite under `./data/`; on Render, configure Turso because Render's local filesystem is ephemeral.
 
 Run the local unit suite with `pip install -r requirements-dev.txt && python -m pytest -q`.
 
@@ -47,7 +47,24 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Docker Compose persists only the SQLite data volume. Temporary file downloads are stored in a temporary directory and removed after processing. If using `read_only: true`, Playwright uses `/tmp`; temporary storage is configured by Compose.
+Docker Compose persists only the SQLite data volume. Temporary file downloads are stored in a temporary directory and removed after processing. If using `read_only: true`, Playwright uses `/tmp`; temporary storage is configured by Compose. The health endpoint is available at `http://localhost:10000/healthz`.
+
+## Deploy on Render with Turso
+
+This repository includes a [`render.yaml`](render.yaml) Blueprint for a Docker-based web service on Render's Free plan (change the plan in Render if you choose). Deploy the Blueprint or create a Docker web service from this repository. The app binds its HTTP health server to `0.0.0.0:$PORT` (Render defaults `PORT` to `10000`) and uses `/healthz` as the Render health-check path. The endpoint returns success only after bot startup and a successful database check; the database check is cached for 30 seconds.
+
+Set these required Render environment variables/secrets:
+
+- `TELEGRAM_BOT_TOKEN`
+- `BOT_USERNAME`
+- `TURSO_DATABASE_URL` — your Turso database URL (commonly `libsql://...`)
+- `TURSO_AUTH_TOKEN` — a database-scoped auth token
+
+The app uses Turso's current remote Python driver, `turso_serverless`, which supports Turso/libSQL URLs and the existing SQLite-style schema. It creates or migrates the tables at startup. The app intentionally refuses to start on Render without both Turso variables, rather than silently writing user/payment data to an ephemeral local file. Local SQLite remains available for development. Create the Turso database and auth token in Turso, then set both values in Render's secret environment settings; do not commit the token.
+
+Self-pinging is enabled by default when `RENDER_EXTERNAL_URL` is present. The service sends a GET request to its own `/healthz` URL every `SELF_PING_INTERVAL_SECONDS` (default `300`, or five minutes). You can disable it with `SELF_PING_ENABLED=false` or change the interval (minimum 60 seconds). This is **best effort, not an uptime guarantee**: Render documents that Free web services can spin down after 15 minutes without inbound traffic, and may suspend services that initiate unusually high outbound traffic. Render does not guarantee self-pinging will keep a Free instance awake; choose an always-on paid service if continuous availability is required.
+
+The optional userbot variables (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_USERBOT_SESSION`) can also be added to Render if using `/send` and Mini App capture.
 
 ## Configure Telegram Stars
 
@@ -95,3 +112,7 @@ The original opt-in `/relay @username message` command remains available when bo
 - [MTProto `messages.sendMessage`](https://core.telegram.org/method/messages.sendMessage)
 - [Telegram RPC errors](https://core.telegram.org/api/errors)
 - [Telethon update events](https://docs.telethon.dev/en/stable/modules/events.html)
+- [Render port binding](https://render.com/docs/web-services#port-binding)
+- [Render health checks](https://render.com/docs/health-checks)
+- [Render Free instance limitations](https://render.com/docs/free#free-web-services)
+- [Turso Python quickstart](https://docs.turso.tech/sdk/python/quickstart)

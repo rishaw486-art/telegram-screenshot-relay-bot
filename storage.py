@@ -3,22 +3,61 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import turso_serverless
+
+
+def _dict_row(cursor: Any, row: tuple[Any, ...]) -> dict[str, Any]:
+    return {column[0]: value for column, value in zip(cursor.description or (), row)}
+
 
 class Store:
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        turso_database_url: str | None = None,
+        turso_auth_token: str | None = None,
+    ):
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.turso_database_url = turso_database_url
+        self.turso_auth_token = turso_auth_token
+        if bool(turso_database_url) != bool(turso_auth_token):
+            raise ValueError(
+                "Both a Turso database URL and authentication token are required."
+            )
+        if not self.turso_database_url:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=15)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+    @contextmanager
+    def _connect(self) -> Iterator[Any]:
+        if self.turso_database_url:
+            conn = turso_serverless.connect(
+                self.turso_database_url, auth_token=self.turso_auth_token
+            )
+            conn.row_factory = _dict_row
+        else:
+            conn = sqlite3.connect(self.path, timeout=15)
+            conn.row_factory = _dict_row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def health_check(self) -> None:
+        with self._connect() as db:
+            db.execute("SELECT 1").fetchone()
 
     def _init(self) -> None:
         with self._connect() as db:

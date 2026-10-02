@@ -6,4 +6,5 @@ RUN pip install --no-cache-dir -r requirements.txt && playwright install --with-
 COPY . .
 RUN useradd --create-home --uid 10001 botuser && mkdir -p /app/data && chown -R botuser:botuser /app
 USER botuser
+EXPOSE 10000
 CMD ["python", "bot.py"]

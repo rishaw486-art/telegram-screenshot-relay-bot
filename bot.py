@@ -26,6 +26,7 @@ from aiogram.types import (
 from app_settings import Settings
 from billing import SendRecurringStarsInvoice
 from capture import CaptureError, capture_web, render_file
+from health_server import HealthServer, self_ping_loop
 from miniapp import MiniAppError, authenticated_webview_url, parse_miniapp_link
 from storage import Store
 from userbot_service import UserbotSendError, UserbotService
@@ -42,7 +43,11 @@ SUBSCRIPTION_PERIOD = (
 )
 
 settings = Settings.from_env()
-store = Store(settings.database_path)
+store = Store(
+    settings.database_path,
+    turso_database_url=settings.turso_database_url,
+    turso_auth_token=settings.turso_auth_token,
+)
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 awaiting_support: set[int] = set()
@@ -722,23 +727,45 @@ async def privacy_command(message: Message) -> None:
 
 async def main() -> None:
     global userbot_service
-    await bot.delete_webhook(drop_pending_updates=False)
-    me = await bot.get_me()
-    log.info("bot started username=@%s", me.username)
-    if settings.userbot_enabled:
-        candidate = UserbotService(settings, store, bot)
-        try:
-            await candidate.start()
-            userbot_service = candidate
-        except Exception as exc:
-            log.warning("userbot startup failed error=%s", type(exc).__name__)
-            await candidate.close()
+    health_server = HealthServer(store, "0.0.0.0", settings.port)
+    await health_server.start()
+    keepalive_task: asyncio.Task[None] | None = None
     try:
+        await bot.delete_webhook(drop_pending_updates=False)
+        me = await bot.get_me()
+        log.info("bot started username=@%s", me.username)
+        if settings.userbot_enabled:
+            candidate = UserbotService(settings, store, bot)
+            try:
+                await candidate.start()
+                userbot_service = candidate
+            except Exception as exc:
+                log.warning("userbot startup failed error=%s", type(exc).__name__)
+                await candidate.close()
+        health_server.ready = True
+        if settings.self_ping_enabled and settings.render_external_url:
+            keepalive_task = asyncio.create_task(
+                self_ping_loop(
+                    settings.render_external_url,
+                    settings.self_ping_interval_seconds,
+                ),
+                name="render-self-ping",
+            )
+        elif settings.self_ping_enabled:
+            log.info("self-ping disabled: RENDER_EXTERNAL_URL is not set")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        health_server.ready = False
+        if keepalive_task:
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
         if userbot_service:
             await userbot_service.close()
         await bot.session.close()
+        await health_server.close()
 
 
 if __name__ == "__main__":
