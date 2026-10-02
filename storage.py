@@ -48,6 +48,13 @@ class Store:
                     created_at INTEGER NOT NULL,
                     PRIMARY KEY(user_a, user_b)
                 );
+                CREATE TABLE IF NOT EXISTS userbot_relays (
+                    peer_id INTEGER PRIMARY KEY,
+                    requester_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    last_activity INTEGER NOT NULL
+                );
             """)
             columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(relay_requests)")
@@ -219,3 +226,75 @@ class Store:
                 (user_id, user_id),
             )
         return peers
+
+    def open_userbot_relay(self, peer_id: int, requester_id: int, username: str) -> str:
+        now = int(time.time())
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT requester_id, active, last_activity FROM userbot_relays WHERE peer_id=?",
+                (peer_id,),
+            ).fetchone()
+            if (
+                row
+                and row["active"]
+                and row["last_activity"] >= now - 30 * 24 * 60 * 60
+            ):
+                if row["requester_id"] != requester_id:
+                    return "busy"
+                db.execute(
+                    "UPDATE userbot_relays SET last_activity=? WHERE peer_id=?",
+                    (now, peer_id),
+                )
+                return "existing"
+            db.execute(
+                """
+                INSERT INTO userbot_relays(peer_id,requester_id,username,active,last_activity)
+                VALUES(?,?,?,1,?)
+                ON CONFLICT(peer_id) DO UPDATE SET requester_id=excluded.requester_id,
+                    username=excluded.username, active=1, last_activity=excluded.last_activity
+                """,
+                (peer_id, requester_id, username.lower().lstrip("@"), now),
+            )
+            return "created"
+
+    def userbot_requester(self, peer_id: int) -> int | None:
+        now = int(time.time())
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT requester_id,last_activity FROM userbot_relays WHERE peer_id=? AND active=1",
+                (peer_id,),
+            ).fetchone()
+            if not row:
+                return None
+            if row["last_activity"] < now - 30 * 24 * 60 * 60:
+                db.execute(
+                    "UPDATE userbot_relays SET active=0 WHERE peer_id=?", (peer_id,)
+                )
+                return None
+            db.execute(
+                "UPDATE userbot_relays SET last_activity=? WHERE peer_id=?",
+                (now, peer_id),
+            )
+            return int(row["requester_id"])
+
+    def close_userbot_relay(self, peer_id: int, requester_id: int) -> bool:
+        with self._connect() as db:
+            cursor = db.execute(
+                "UPDATE userbot_relays SET active=0 WHERE peer_id=? AND requester_id=? AND active=1",
+                (peer_id, requester_id),
+            )
+            return cursor.rowcount > 0
+
+    def close_userbot_relays(self, requester_id: int) -> list[int]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT peer_id FROM userbot_relays WHERE requester_id=? AND active=1",
+                (requester_id,),
+            ).fetchall()
+            peers = [int(row["peer_id"]) for row in rows]
+            db.execute(
+                "UPDATE userbot_relays SET active=0 WHERE requester_id=? AND active=1",
+                (requester_id,),
+            )
+            return peers

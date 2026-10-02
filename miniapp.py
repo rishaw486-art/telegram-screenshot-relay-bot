@@ -19,18 +19,23 @@ def parse_miniapp_link(raw: str) -> tuple[str, str | None, str | None]:
     host = (parsed.hostname or "").lower()
     if host not in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
         raise MiniAppError("This is not a Telegram Mini App link.")
-    parts = [p for p in parsed.path.strip("/").split("/") if p]
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
     if not parts or parts[0].startswith("+") or parts[0] == "c":
         raise MiniAppError("Use a public bot/Mini App link, not a private invite link.")
-    bot = parts[0].lstrip("@").lower()
-    if not re.fullmatch(r"[a-z0-9_]{5,32}", bot):
+    bot_username = parts[0].lstrip("@").lower()
+    if not re.fullmatch(r"[a-z0-9_]{5,32}", bot_username):
         raise MiniAppError("Could not identify the Mini App bot username.")
     app_short_name = parts[1] if len(parts) > 1 else None
     start_param = parse_qs(parsed.query).get("startapp", [None])[0]
-    return bot, app_short_name, start_param
+    return bot_username, app_short_name, start_param
 
 
-async def authenticated_webview_url(settings: Settings, raw_link: str) -> str:
+async def authenticated_webview_url(
+    settings: Settings,
+    raw_link: str,
+    *,
+    client: TelegramClient | None = None,
+) -> str:
     if not settings.miniapp_capture_enabled:
         raise MiniAppError(
             "Authenticated Mini App capture is not configured by the owner."
@@ -41,11 +46,16 @@ async def authenticated_webview_url(settings: Settings, raw_link: str) -> str:
             "This Mini App bot is not on the owner's approved allowlist."
         )
 
-    client = TelegramClient(
-        StringSession(settings.userbot_session), settings.api_id, settings.api_hash
-    )
+    owns_client = client is None
+    if client is None:
+        client = TelegramClient(
+            StringSession(settings.userbot_session), settings.api_id, settings.api_hash
+        )
     try:
-        await client.connect()
+        if owns_client:
+            await client.connect()
+        elif not client.is_connected():
+            raise MiniAppError("The dedicated userbot is not connected.")
         if not await client.is_user_authorized():
             raise MiniAppError("The dedicated userbot session is not authorized.")
         peer = await client.get_input_entity(bot_username)
@@ -126,4 +136,5 @@ async def authenticated_webview_url(settings: Settings, raw_link: str) -> str:
             f"Could not open this Mini App ({type(exc).__name__})."
         ) from exc
     finally:
-        await client.disconnect()
+        if owns_client:
+            await client.disconnect()

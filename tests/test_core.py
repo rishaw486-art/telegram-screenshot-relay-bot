@@ -50,6 +50,18 @@ def test_subscription_and_relay_state(tmp_path: Path):
     assert store.conversations_for(20) == []
 
 
+def test_userbot_reply_route_targets_only_one_requester(tmp_path: Path):
+    store = Store(tmp_path / "test.sqlite3")
+    assert store.open_userbot_relay(700, 10, "person") == "created"
+    assert store.userbot_requester(700) == 10
+    assert store.open_userbot_relay(700, 10, "person") == "existing"
+    assert store.open_userbot_relay(700, 20, "person") == "busy"
+    assert store.close_userbot_relays(10) == [700]
+    assert store.userbot_requester(700) is None
+    assert store.open_userbot_relay(700, 20, "person") == "created"
+    assert store.userbot_requester(700) == 20
+
+
 def test_remote_vision_requires_explicit_enable_and_api_key(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:fake")
     monkeypatch.setenv("BOT_USERNAME", "testbot")

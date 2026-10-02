@@ -72,13 +72,12 @@ class Settings:
         )
 
     @property
+    def userbot_enabled(self) -> bool:
+        return bool(self.api_id and self.api_hash and self.userbot_session)
+
+    @property
     def miniapp_capture_enabled(self) -> bool:
-        return bool(
-            self.api_id
-            and self.api_hash
-            and self.userbot_session
-            and self.miniapp_allowed_bots
-        )
+        return self.userbot_enabled and bool(self.miniapp_allowed_bots)
 
     @property
     def remote_vision_enabled(self) -> bool:

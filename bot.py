@@ -28,6 +28,7 @@ from billing import SendRecurringStarsInvoice
 from capture import CaptureError, capture_web, render_file
 from miniapp import MiniAppError, authenticated_webview_url, parse_miniapp_link
 from storage import Store
+from userbot_service import UserbotSendError, UserbotService
 from vision import describe_image
 
 logging.basicConfig(
@@ -45,6 +46,7 @@ store = Store(settings.database_path)
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 awaiting_support: set[int] = set()
+userbot_service: UserbotService | None = None
 
 
 def _user_tag(message: Message) -> str:
@@ -137,7 +139,7 @@ async def start(message: Message, command: CommandObject) -> None:
     await message.answer(
         "Hi! I can capture screenshots and short descriptions of public websites, supported files, "
         "and approved Telegram Mini Apps. Use /buy to unlock the paid features.\n\n"
-        "Commands: /buy, /status, /relay @username message, /stoprelay, /paysupport, /privacy."
+        "Commands: /buy, /status, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy."
     )
 
 
@@ -147,7 +149,7 @@ async def buy(message: Message) -> None:
         SendRecurringStarsInvoice(
             chat_id=message.chat.id,
             title="30-day bot access",
-            description="One month of screenshot, supported-file preview, and opt-in relay service.",
+            description="One month of screenshot, supported-file preview, and userbot messaging service.",
             payload="subscription_30d_250_xtr_v1",
             currency="XTR",
             provider_token="",
@@ -259,6 +261,43 @@ async def successful_payment(message: Message) -> None:
     )
     await message.answer(
         f"Payment confirmed. Your access is active until <code>{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(expiration))}</code>. Send a website link or supported file to begin."
+    )
+
+
+@dp.message(Command("send"))
+async def send_via_userbot(message: Message, command: CommandObject) -> None:
+    if not await _paid_or_prompt(message):
+        return
+    if message.chat.type != "private":
+        await message.answer(
+            "Please use /send in a private chat with this bot so replies can be delivered back to you."
+        )
+        return
+    if not command.args:
+        await message.answer("Format: <code>/send @username your message</code>")
+        return
+    parts = command.args.split(maxsplit=1)
+    username = parts[0].strip().lstrip("@").lower()
+    text = parts[1].strip() if len(parts) > 1 else ""
+    if not re.fullmatch(r"[a-z0-9_]{5,32}", username) or not text:
+        await message.answer(
+            "Please include a public username and a message: <code>/send @username your message</code>"
+        )
+        return
+    if userbot_service is None:
+        await message.answer(
+            "Direct username messaging is not configured or the userbot is offline. Please contact the bot owner."
+        )
+        return
+    try:
+        account_label = await userbot_service.send_to_username(
+            message.from_user.id, username, text
+        )
+    except UserbotSendError as exc:
+        await message.answer(_escape(str(exc)))
+        return
+    await message.answer(
+        f"Sent to @{_escape(username)} from {account_label}. The recipient does not need to start this bot. They will see the connected Telegram account's identity; if they reply to it, the reply will be delivered here. Use /stoprelay to stop forwarding replies."
     )
 
 
@@ -397,8 +436,11 @@ async def stop_relay(message: Message) -> None:
     if not message.from_user:
         return
     peers = store.deactivate_conversations(message.from_user.id)
-    if not peers:
-        await message.answer("You have no active relay conversations.")
+    userbot_peers = store.close_userbot_relays(message.from_user.id)
+    if not peers and not userbot_peers:
+        await message.answer(
+            "You have no active relay conversations or userbot reply routes."
+        )
         return
     for peer in peers:
         try:
@@ -408,7 +450,9 @@ async def stop_relay(message: Message) -> None:
             )
         except (TelegramForbiddenError, TelegramBadRequest):
             pass
-    await message.answer("Relay stopped. No further messages will be forwarded.")
+    await message.answer(
+        "Relay stopped. No further replies will be forwarded to you through this bot."
+    )
 
 
 async def _relay_incoming(message: Message) -> bool:
@@ -467,7 +511,11 @@ async def _process_link(message: Message, raw_url: str) -> None:
                 "Opening the approved Mini App securely and capturing its initial screen…"
             )
             try:
-                authenticated_url = await authenticated_webview_url(settings, raw_url)
+                authenticated_url = await authenticated_webview_url(
+                    settings,
+                    raw_url,
+                    client=userbot_service.client if userbot_service else None,
+                )
                 image, title, description = await capture_web(
                     authenticated_url,
                     settings.page_timeout_seconds,
@@ -622,7 +670,9 @@ async def text_message(message: Message) -> None:
             )
             try:
                 authenticated_url = await authenticated_webview_url(
-                    settings, "https://t.me/" + username
+                    settings,
+                    "https://t.me/" + username,
+                    client=userbot_service.client if userbot_service else None,
                 )
                 image, title, description = await capture_web(
                     authenticated_url,
@@ -659,24 +709,35 @@ async def text_message(message: Message) -> None:
 @dp.message(Command("help"))
 async def help_command(message: Message) -> None:
     await message.answer(
-        "Send a website URL or supported image/PDF/text file for a screenshot and description.\n\nCommands: /buy, /status, /cancel, /relay @username message, /stoprelay, /paysupport, /privacy.\n\nRelay messages are delivered only after the recipient starts the bot and accepts. Both participants need paid access. Mini App capture uses only owner-approved bots and a dedicated userbot session."
+        "Send a website URL or supported image/PDF/text file for a screenshot and description.\n\nCommands: /buy, /status, /cancel, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy.\n\n/send sends through the connected userbot account; the recipient does not need to start this bot and replies return here. The recipient sees the userbot account's identity. /relay is a separate opt-in bot-to-bot mode. Mini App capture uses owner-approved bots and the same dedicated userbot."
     )
 
 
 @dp.message(Command("privacy"))
 async def privacy_command(message: Message) -> None:
     await message.answer(
-        "Website pages are opened in an isolated browser. Uploaded images, PDFs, and text files are downloaded temporarily for preview and deleted after processing; unsupported files are not executed. By default, screenshots stay within the bot worker. If the owner explicitly enables remote vision, screenshots are sent to the configured vision provider for captions. Relay requests are held until accepted, then only the message text and active conversation state needed to deliver replies are stored. For an approved Mini App, a dedicated owner-authorized Telegram account opens the app; the app may receive that account's Telegram profile/init data. The authenticated launch URL is not returned to you or intentionally logged. Do not send links or files you are not authorized to share."
+        "Website pages are opened in an isolated browser. Uploaded images, PDFs, and text files are downloaded temporarily for preview and deleted after processing; unsupported files are not executed. By default, screenshots stay within the bot worker. If the owner explicitly enables remote vision, screenshots are sent to the configured vision provider for captions. For /send, your message is sent by the dedicated userbot account, whose identity is visible to the recipient; replies and supported attachments from that chat are forwarded back to you. The reply route can be stopped with /stoprelay and expires after 30 days without activity. For an approved Mini App, the same account opens the app; it may receive the account's Telegram profile/init data. The authenticated launch URL is not returned to you or intentionally logged. Do not send links or files you are not authorized to share."
     )
 
 
 async def main() -> None:
+    global userbot_service
     await bot.delete_webhook(drop_pending_updates=False)
     me = await bot.get_me()
     log.info("bot started username=@%s", me.username)
+    if settings.userbot_enabled:
+        candidate = UserbotService(settings, store, bot)
+        try:
+            await candidate.start()
+            userbot_service = candidate
+        except Exception as exc:
+            log.warning("userbot startup failed error=%s", type(exc).__name__)
+            await candidate.close()
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        if userbot_service:
+            await userbot_service.close()
         await bot.session.close()
 
 
