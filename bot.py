@@ -293,15 +293,12 @@ async def request_stars_invoice(callback: CallbackQuery) -> None:
     if not callback.from_user or not isinstance(callback.message, Message):
         await callback.answer("Could not identify this purchase chat.", show_alert=True)
         return
-    await callback.answer()
     if callback.from_user.id in settings.owner_ids:
+        await callback.answer()
         await callback.message.answer("Owner access is free and unlimited.")
         return
     try:
-        # Aiogram forwards unknown keyword fields to Bot API, which keeps this
-        # compatible with releases that predate recurring Stars support.
-        await bot.send_invoice(
-            chat_id=callback.message.chat.id,
+        invoice_url = await bot.create_invoice_link(
             title="Premium access (1 month)",
             description="Unlimited website and file previews, Telegram bot inspection, Mini App capture, and userbot messaging for one month.",
             payload="subscription_30d_250_xtr_v1",
@@ -312,13 +309,19 @@ async def request_stars_invoice(callback: CallbackQuery) -> None:
         )
     except TelegramAPIError as exc:
         log.warning("subscription invoice creation failed user=%s error=%s", callback.from_user.id, type(exc).__name__)
-        await callback.message.answer(
-            "Telegram could not create the Stars invoice right now. Please try /buy again in a moment."
+        await callback.answer(
+            "Telegram could not create the Stars invoice right now. Please try /buy again in a moment.",
+            show_alert=True,
         )
         return
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(
-        "Your 250-Star monthly invoice is ready. Access starts only after Telegram confirms payment."
+    await callback.answer(url=invoice_url)
+    await callback.message.edit_text(
+        "Stars payment opened. If Telegram did not open it automatically, tap the button below.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Open Stars payment", url=invoice_url)]
+            ]
+        )
     )
 
 
