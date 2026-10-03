@@ -696,9 +696,9 @@ async def _process_link(message: Message, raw_url: str) -> None:
             except (MiniAppError, CaptureError) as exc:
                 await message.answer(_escape(str(exc)))
             except Exception as exc:
-                log.warning("miniapp capture failed error=%s", type(exc).__name__)
+                log.exception("miniapp capture failed error=%s", type(exc).__name__)
                 await message.answer(
-                    "Mini App capture failed. It may require Telegram's native WebView bridge or an interactive login by the account owner."
+                    f"Mini App capture failed during browser rendering ({type(exc).__name__}). Check the deployment logs for the capture stage."
                 )
             finally:
                 authenticated_url = None
@@ -813,8 +813,10 @@ async def _inspect_telegram_bot(message: Message, username: str) -> None:
         except (MiniAppError, CaptureError) as exc:
             await message.answer(_escape(str(exc)))
         except Exception as exc:
-            log.warning("inspected bot Mini App capture failed error=%s", type(exc).__name__)
-            await message.answer("I could not capture that bot's Mini App.")
+            log.exception("inspected bot Mini App capture failed error=%s", type(exc).__name__)
+            await message.answer(
+                f"Mini App capture failed during browser rendering ({type(exc).__name__}). Check the deployment logs for the capture stage."
+            )
         finally:
             authenticated_url = None
 

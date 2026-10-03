@@ -128,7 +128,14 @@ def _telegram_webapp_bridge_script(url: str) -> str | None:
   }};
   window.Telegram = window.Telegram || {{}};
   window.Telegram.WebApp = webApp;
-  window.Telegram.WebView = window.Telegram.WebView || {{ receiveEvent: () => {{}} }};
+  const webView = window.Telegram.WebView || {{}};
+  // The official telegram-web-app.js runtime calls these lower-level bridge
+  // methods while it initializes WebApp. They are intentionally no-ops for a
+  // read-only screenshot, but must exist so app initialization does not throw.
+  webView.postEvent = webView.postEvent || (() => {{}});
+  webView.receiveEvent = webView.receiveEvent || ((event, data) => emit(event, data));
+  webView.callStorageMethod = webView.callStorageMethod || (() => {{}});
+  window.Telegram.WebView = webView;
 }})();
 """
 
@@ -228,7 +235,7 @@ async def capture_web(
         page = await context.new_page()
         bridge_script = _telegram_webapp_bridge_script(url)
         if bridge_script:
-            await page.add_init_script(bridge_script)
+            await context.add_init_script(bridge_script)
 
         async def guard(route):
             request_url = route.request.url

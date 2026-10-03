@@ -29,6 +29,8 @@ def test_telegram_webapp_bridge_uses_authentic_fragment_data():
     assert 'const initData = "query_id=AAQ&user=%7B%22id%22%3A42%7D&hash=abc"' in script
     assert '"id": 42' in script
     assert "window.Telegram.WebApp = webApp" in script
+    assert "webView.postEvent" in script
+    assert "webView.callStorageMethod" in script
 
 
 def test_extract_public_url_normalizes_bare_and_www_links():
