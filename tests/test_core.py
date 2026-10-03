@@ -21,6 +21,16 @@ from storage import Store
 from vision import describe_image
 
 
+def test_telegram_webapp_bridge_uses_authentic_fragment_data():
+    script = capture._telegram_webapp_bridge_script(
+        "https://mini.example/launch#tgWebAppData=query_id%3DAAQ%26user%3D%257B%2522id%2522%253A42%257D%26hash%3Dabc&tgWebAppVersion=8.0"
+    )
+    assert script is not None
+    assert 'const initData = "query_id=AAQ&user=%7B%22id%22%3A42%7D&hash=abc"' in script
+    assert '"id": 42' in script
+    assert "window.Telegram.WebApp = webApp" in script
+
+
 def test_extract_public_url_normalizes_bare_and_www_links():
     assert extract_public_url("Check example.com/a?x=1.") == "https://example.com/a?x=1"
     assert extract_public_url("www.example.org/docs") == "https://www.example.org/docs"
@@ -208,6 +218,40 @@ def test_userbot_bot_inspection_reads_start_reply_and_webapp_button(monkeypatch)
     assert inspection["name"] == "Demo Bot"
     assert inspection["replies"] == ["Welcome to the demo bot."]
     assert inspection["buttons"] == ["Open Mini App"]
+    assert inspection["has_webapp_button"] is True
+
+
+def test_userbot_bot_inspection_detects_simple_webview_button(monkeypatch):
+    bot_entity = types.User(
+        id=43, access_hash=1, first_name="Simple Bot", username="simplebot", bot=True
+    )
+
+    class KeyboardButtonSimpleWebView:
+        text = "Launch"
+        url = "https://app.example/launch"
+
+    reply = SimpleNamespace(
+        id=12, sender_id=43, out=False, raw_text="Open the app",
+        media=None, reply_markup=SimpleNamespace(
+            rows=[SimpleNamespace(buttons=[KeyboardButtonSimpleWebView()])]
+        ),
+    )
+
+    class FakeClient:
+        def is_connected(self): return True
+        async def get_entity(self, username): return bot_entity
+        async def send_message(self, entity, text): return SimpleNamespace(id=11)
+        async def get_messages(self, entity, limit): return [reply]
+
+    async def no_sleep(_): return None
+    monkeypatch.setattr(userbot_service.asyncio, "sleep", no_sleep)
+    service = userbot_service.UserbotService.__new__(userbot_service.UserbotService)
+    service.client = FakeClient()
+    service._self_id = 7
+    service._send_lock = asyncio.Lock()
+    service._last_by_requester = {}
+    service._last_global_send = 0.0
+    inspection = asyncio.run(service.inspect_public_bot(100, "simplebot"))
     assert inspection["has_webapp_button"] is True
 
 

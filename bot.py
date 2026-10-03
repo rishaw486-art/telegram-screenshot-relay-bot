@@ -24,12 +24,12 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
     Message,
     PreCheckoutQuery,
 )
 
 from app_settings import Settings
-from billing import SendRecurringStarsInvoice
 from capture import CaptureError, capture_web, capture_website_apiflash, render_file
 from health_server import HealthServer, self_ping_loop
 from link_utils import extract_public_url
@@ -279,19 +279,26 @@ async def accept_purchase_terms(callback: CallbackQuery) -> None:
     if callback.from_user.id in settings.owner_ids:
         await callback.message.answer("Owner access is free and unlimited.")
         return
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await bot(
-        SendRecurringStarsInvoice(
+    try:
+        # Aiogram forwards unknown keyword fields to Bot API, which keeps this
+        # compatible with releases that predate recurring Stars support.
+        await bot.send_invoice(
             chat_id=callback.message.chat.id,
             title="Premium access (1 month)",
             description="Unlimited website and file previews, Telegram bot inspection, Mini App capture, and userbot messaging for one month.",
             payload="subscription_30d_250_xtr_v1",
             currency="XTR",
-            provider_token="",
-            prices=[{"label": "30 days of access", "amount": PRICE_STARS}],
+            provider_token=None,
+            prices=[LabeledPrice(label="30 days of access", amount=PRICE_STARS)],
             subscription_period=SUBSCRIPTION_PERIOD,
         )
-    )
+    except TelegramAPIError as exc:
+        log.warning("subscription invoice creation failed user=%s error=%s", callback.from_user.id, type(exc).__name__)
+        await callback.message.answer(
+            "Telegram could not create the Stars invoice right now. Please try /buy again in a moment or use /paysupport if the problem continues."
+        )
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
         "Your 250-Star monthly invoice is ready. Access starts only after Telegram confirms payment."
     )

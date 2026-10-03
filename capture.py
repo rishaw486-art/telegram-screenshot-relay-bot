@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import html
 import ipaddress
+import json
 import socket
 import tempfile
 import tarfile
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pymupdf as fitz
@@ -71,6 +72,65 @@ def _host_is_public(host: str) -> bool:
         )
     except (OSError, ValueError):
         return False
+
+
+def _telegram_webapp_bridge_script(url: str) -> str | None:
+    """Expose Telegram's launch data and browser bridge before app scripts run."""
+    fragment = parse_qs(urlparse(url).fragment, keep_blank_values=True)
+    encoded_data = fragment.get("tgWebAppData", [None])[0]
+    if not encoded_data:
+        return None
+    # parse_qs has already decoded the outer tgWebAppData value. Do not
+    # unquote again: percent-encoding inside initData is part of its signed
+    # representation and must remain byte-for-byte intact.
+    init_data = encoded_data
+    values = parse_qs(init_data, keep_blank_values=True)
+    init_data_unsafe: dict[str, object] = {}
+    for key, items in values.items():
+        value: object = items[-1] if items else ""
+        if key == "user":
+            try:
+                value = json.loads(str(value))
+            except (TypeError, ValueError):
+                pass
+        init_data_unsafe[key] = value
+
+    init_data_json = json.dumps(init_data, ensure_ascii=False)
+    unsafe_json = json.dumps(init_data_unsafe, ensure_ascii=False)
+    version_json = json.dumps(fragment.get("tgWebAppVersion", ["7.10"])[0])
+    platform_json = json.dumps(fragment.get("tgWebAppPlatform", ["web"])[0])
+    return f"""
+(() => {{
+  const initData = {init_data_json};
+  const initDataUnsafe = {unsafe_json};
+  const listeners = new Map();
+  const emit = (event, ...args) => (listeners.get(event) || []).forEach(fn => fn(...args));
+  const onEvent = (event, callback) => {{
+    if (typeof callback !== 'function') return;
+    const callbacks = listeners.get(event) || [];
+    callbacks.push(callback); listeners.set(event, callbacks);
+  }};
+  const offEvent = (event, callback) => listeners.set(event, (listeners.get(event) || []).filter(fn => fn !== callback));
+  const mainButton = {{
+    isVisible: false, isActive: false, isProgressVisible: false, text: '', color: '#2481cc', textColor: '#ffffff',
+    setText(text) {{ this.text = String(text); return this; }}, show() {{ this.isVisible = true; return this; }}, hide() {{ this.isVisible = false; return this; }},
+    enable() {{ this.isActive = true; return this; }}, disable() {{ this.isActive = false; return this; }}, showProgress() {{ this.isProgressVisible = true; return this; }}, hideProgress() {{ this.isProgressVisible = false; return this; }},
+    onClick(callback) {{ onEvent('mainButtonClicked', callback); return this; }}, offClick(callback) {{ offEvent('mainButtonClicked', callback); return this; }}
+  }};
+  const webApp = {{
+    initData, initDataUnsafe, version: {version_json}, platform: {platform_json}, colorScheme: 'light', themeParams: {{}}, isExpanded: true,
+    isClosingConfirmationEnabled: false, viewportHeight: 900, viewportStableHeight: 900, headerColor: '#ffffff', backgroundColor: '#ffffff',
+    isVersionAtLeast: () => true, ready: () => emit('ready'), expand: () => {{}}, close: () => {{}},
+    enableClosingConfirmation: () => {{}}, disableClosingConfirmation: () => {{}}, onEvent, offEvent, sendData: () => {{}}, MainButton: mainButton,
+    BackButton: {{ isVisible: false, show() {{ this.isVisible = true; return this; }}, hide() {{ this.isVisible = false; return this; }}, onClick(callback) {{ onEvent('backButtonClicked', callback); return this; }}, offClick(callback) {{ offEvent('backButtonClicked', callback); return this; }} }},
+    HapticFeedback: {{ impactOccurred: () => {{}}, notificationOccurred: () => {{}}, selectionChanged: () => {{}} }},
+    CloudStorage: {{ getItem: (_key, callback) => callback && callback(null, ''), setItem: (_key, _value, callback) => callback && callback(null, true) }}
+  }};
+  window.Telegram = window.Telegram || {{}};
+  window.Telegram.WebApp = webApp;
+  window.Telegram.WebView = window.Telegram.WebView || {{ receiveEvent: () => {{}} }};
+}})();
+"""
 
 
 async def capture_website_apiflash(
@@ -166,6 +226,9 @@ async def capture_web(
             viewport={"width": 1365, "height": 900}, device_scale_factor=1
         )
         page = await context.new_page()
+        bridge_script = _telegram_webapp_bridge_script(url)
+        if bridge_script:
+            await page.add_init_script(bridge_script)
 
         async def guard(route):
             request_url = route.request.url
