@@ -51,7 +51,6 @@ class Settings:
     api_hash: str | None
     userbot_session: str | None
     owner_ids: frozenset[int]
-    support_admin_ids: frozenset[int]
     vision_enabled: bool
     vision_api_key: str | None
     vision_api_base: str
@@ -116,7 +115,6 @@ class Settings:
             api_hash=os.getenv("TELEGRAM_API_HASH") or None,
             userbot_session=os.getenv("TELEGRAM_USERBOT_SESSION") or None,
             owner_ids=_ids_env("OWNER_IDS"),
-            support_admin_ids=_ids_env("SUPPORT_ADMIN_IDS"),
             vision_enabled=_bool_env("ENABLE_REMOTE_VISION", bool(groq_key)),
             vision_api_key=vision_key,
             vision_api_base=vision_api_base,

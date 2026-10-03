@@ -56,7 +56,6 @@ store = Store(
 )
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-awaiting_support: set[int] = set()
 pending_broadcasts: dict[int, str] = {}
 userbot_service: UserbotService | None = None
 BOT_STARTED_AT = time.time()
@@ -236,7 +235,7 @@ async def start(message: Message, command: CommandObject) -> None:
         return
     await message.answer(
         "Hi! I can preview public web links and files, inspect public Telegram bots, and open Mini Apps from links. Use /buy for unlimited access at 250 Stars/month or /referral to earn free previews.\n\n"
-        "Commands: /buy, /terms, /status, /referral, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy."
+        "Commands: /buy, /terms, /status, /referral, /send @username message, /relay @username message, /stoprelay, /privacy."
     )
 
 
@@ -246,8 +245,8 @@ async def buy(message: Message) -> None:
         await message.answer("Owner access is free and unlimited.")
         return
     await message.answer(
-        "Premium costs 250 Telegram Stars and renews every 30 days until canceled. "
-        "Review /terms, then confirm below to receive the invoice.",
+        "Premium costs 250 Telegram Stars and renews every 30 days. "
+        "Review /terms, then accept to continue to the Stars payment button.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="I agree — continue to invoice", callback_data="buy_terms:agree")],
@@ -265,13 +264,32 @@ async def show_purchase_terms(callback: CallbackQuery) -> None:
             "<b>Premium subscription terms</b>\n"
             "Price: 250 Telegram Stars every 30 days (recurring).\n"
             "Premium grants unlimited access to the bot's current preview, inspection, and messaging features while active.\n"
-            "Renewal can be canceled with /cancel; access remains until the paid period expires.\n"
-            "For payment questions, use /paysupport. Privacy details are available with /privacy."
+            "Access remains active for the paid period. Privacy details are available with /privacy."
         )
 
 
 @dp.callback_query(F.data == "buy_terms:agree")
 async def accept_purchase_terms(callback: CallbackQuery) -> None:
+    if not callback.from_user or not isinstance(callback.message, Message):
+        await callback.answer("Could not identify this purchase chat.", show_alert=True)
+        return
+    await callback.answer()
+    if callback.from_user.id in settings.owner_ids:
+        await callback.message.answer("Owner access is free and unlimited.")
+        return
+    await callback.message.edit_text(
+        "You accepted the premium terms. Choose the Stars payment button below to request the invoice.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Pay 250 ⭐ Stars", callback_data="buy_payment:stars")],
+                [InlineKeyboardButton(text="Read /terms", callback_data="buy_terms:terms")],
+            ]
+        ),
+    )
+
+
+@dp.callback_query(F.data == "buy_payment:stars")
+async def request_stars_invoice(callback: CallbackQuery) -> None:
     if not callback.from_user or not isinstance(callback.message, Message):
         await callback.answer("Could not identify this purchase chat.", show_alert=True)
         return
@@ -295,7 +313,7 @@ async def accept_purchase_terms(callback: CallbackQuery) -> None:
     except TelegramAPIError as exc:
         log.warning("subscription invoice creation failed user=%s error=%s", callback.from_user.id, type(exc).__name__)
         await callback.message.answer(
-            "Telegram could not create the Stars invoice right now. Please try /buy again in a moment or use /paysupport if the problem continues."
+            "Telegram could not create the Stars invoice right now. Please try /buy again in a moment."
         )
         return
     await callback.message.edit_reply_markup(reply_markup=None)
@@ -310,8 +328,7 @@ async def terms_command(message: Message) -> None:
         "<b>Premium subscription terms</b>\n"
         "Price: 250 Telegram Stars every 30 days (recurring).\n"
         "Premium grants unlimited access to the bot's current preview, inspection, and messaging features while active.\n"
-        "Renewal can be canceled with /cancel; access remains until the paid period expires.\n"
-        "For payment questions, use /paysupport. Privacy details are available with /privacy."
+        "Access remains active for the paid period. Privacy details are available with /privacy."
     )
 
 
@@ -359,51 +376,6 @@ async def referral_command(message: Message) -> None:
     )
 
 
-@dp.message(Command("cancel"))
-async def cancel_subscription(message: Message) -> None:
-    if not message.from_user:
-        return
-    charge_id = store.charge_id(message.from_user.id)
-    if not charge_id:
-        await message.answer(
-            "I could not find an active Stars subscription to cancel. Use /paysupport if you need help."
-        )
-        return
-    try:
-        await bot.edit_user_star_subscription(
-            user_id=message.from_user.id,
-            telegram_payment_charge_id=charge_id,
-            is_canceled=True,
-        )
-        await message.answer(
-            "Automatic renewal has been canceled. Your existing paid access remains active until its expiration date."
-        )
-    except Exception as exc:
-        log.warning(
-            "subscription cancel failed for user=%s error=%s",
-            message.from_user.id,
-            type(exc).__name__,
-        )
-        await message.answer(
-            "I could not cancel renewal automatically. Please use /paysupport and include the approximate payment date."
-        )
-
-
-@dp.message(Command("paysupport"))
-async def pay_support(message: Message) -> None:
-    if not message.from_user:
-        return
-    if not settings.support_admin_ids:
-        await message.answer(
-            "Payment support is not configured yet. Please contact the bot owner."
-        )
-        return
-    awaiting_support.add(message.from_user.id)
-    await message.answer(
-        "Please send one text message describing the payment issue. I will forward it to the configured support team."
-    )
-
-
 @dp.pre_checkout_query()
 async def pre_checkout(query: PreCheckoutQuery) -> None:
     ok = (
@@ -430,7 +402,7 @@ async def successful_payment(message: Message) -> None:
         or payment.total_amount != PRICE_STARS
     ):
         await message.answer(
-            "Payment information could not be validated. Please contact /paysupport before retrying."
+            "Payment information could not be validated. Please request a fresh invoice with /buy."
         )
         return
     expiration = payment.subscription_expiration_date or (
@@ -958,24 +930,6 @@ async def text_message(message: Message) -> None:
     if not message.from_user:
         return
     store.register(message.from_user.id, message.from_user.username)
-    if message.from_user.id in awaiting_support:
-        awaiting_support.discard(message.from_user.id)
-        forwarded = False
-        for admin_id in settings.support_admin_ids:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"Payment support from user <code>{message.from_user.id}</code> ({_escape(message.from_user.username or 'no username')}):\n{_escape(message.text or '')}",
-                )
-                forwarded = True
-            except (TelegramForbiddenError, TelegramBadRequest):
-                continue
-        await message.answer(
-            "I forwarded your payment issue to support."
-            if forwarded
-            else "I could not reach the support team. Please contact the bot owner directly."
-        )
-        return
     if await _relay_incoming(message):
         return
     text = (message.text or "").strip()
@@ -1299,7 +1253,7 @@ async def help_command(message: Message) -> None:
         else ""
     )
     await message.answer(
-        "Send any public web link, Telegram bot username/link, Mini App link, or file. Common documents are parsed without execution; other formats receive a metadata preview. New users get one free preview; invite 3 new users with /referral to earn another. Use /buy for unlimited access at 250 Stars/month (recurring every 30 days); read /terms.\n\nCommands: /buy, /terms, /status, /referral, /cancel, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy.\n\n/send sends through the connected userbot account; the recipient does not need to start this bot and replies return here. The recipient sees the userbot account's identity. Public bot inspection sends /start from that account; Mini Apps may receive its Telegram identity and launch data. /relay is a separate opt-in bot-to-bot mode."
+        "Send any public web link, Telegram bot username/link, Mini App link, or file. Common documents are parsed without execution; other formats receive a metadata preview. New users get one free preview; invite 3 new users with /referral to earn another. Use /buy for unlimited access at 250 Stars/month (recurring every 30 days); read /terms.\n\nCommands: /buy, /terms, /status, /referral, /send @username message, /relay @username message, /stoprelay, /privacy.\n\n/send sends through the connected userbot account; the recipient does not need to start this bot and replies return here. The recipient sees the userbot account's identity. Public bot inspection sends /start from that account; Mini Apps may receive its Telegram identity and launch data. /relay is a separate opt-in bot-to-bot mode."
         + owner_commands
     )
 

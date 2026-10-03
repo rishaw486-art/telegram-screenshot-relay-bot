@@ -5,7 +5,7 @@ An MVP Telegram bot that accepts public web links, Telegram bot/Mini App links, 
 ## Features implemented
 
 - Telegram Stars recurring invoice (`XTR`, 250 Stars, exact 30-day renewal period); access is granted only on Telegram's successful-payment update.
-- `/buy`, `/terms`, `/status`, `/referral`, `/cancel`, `/send @username message`, `/stoprelay`, `/paysupport`, `/help`, `/privacy`.
+- `/buy`, `/terms`, `/status`, `/referral`, `/send @username message`, `/stoprelay`, `/help`, `/privacy`.
 - Owner-only `/botstatus`, `/gift <user_id> [days]`, `/message <user_id|@username> <text>`, `/broadcast <text>` (with a confirmation step), and `/ownerhelp`; owner IDs receive free unlimited access.
 - Owner activity messages for first-time users and confirmed Stars payments.
 - One trial screenshot/preview per newly registered user; each three unique users who start via a referral link grant one more preview credit.
@@ -85,9 +85,7 @@ Each first-time user gets **one preview/inspection attempt** for a public websit
 
 ## Configure Telegram Stars
 
-The bot provides `/terms` and requires the user to tap an agreement button before it sends a recurring digital-service invoice for **250 Stars per month** with `currency="XTR"`, no external provider token, and `subscription_period=2592000` (30 days). Telegram renews the subscription automatically; access is updated only from a valid `successful_payment` update. It approves only the matching pre-checkout payload, amount, and currency and retains the Telegram charge ID for `/cancel` and payment support. Telegram requires digital goods/services sold inside Telegram to use Stars.
-
-Set `SUPPORT_ADMIN_IDS` to one or more comma-separated numeric owner/support IDs if support messages should be escalated. `/paysupport` remains available without a subscription.
+The bot provides `/terms` and requires the user to tap an agreement button before showing an inline **Pay 250 ⭐ Stars** button. Tapping it sends a recurring digital-service invoice for **250 Stars per month** with `currency="XTR"`, no external provider token, and `subscription_period=2592000` (30 days). Telegram renews the subscription automatically; access is updated only from a valid `successful_payment` update. It approves only the matching pre-checkout payload, amount, and currency. Telegram requires digital goods/services sold inside Telegram to use Stars.
 
 ## Groq visual captions
 
