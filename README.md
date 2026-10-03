@@ -85,7 +85,7 @@ Each first-time user gets **one preview/inspection attempt** for a public websit
 
 ## Configure Telegram Stars
 
-The bot provides `/terms` and requires the user to tap an agreement button before showing an inline **Pay 250 ⭐ Stars** button. Tapping it creates the recurring Telegram Stars invoice link and opens it directly through the callback; a backup **Open Stars payment** URL button remains in the chat if the Telegram client does not open it automatically. The invoice charges **250 Stars per month** with `currency="XTR"`, no external provider token, and `subscription_period=2592000` (30 days). Telegram renews the subscription automatically; access is updated only from a valid `successful_payment` update. It approves only the matching pre-checkout payload, amount, and currency. Telegram requires digital goods/services sold inside Telegram to use Stars.
+The bot provides `/terms` and requires the user to tap an agreement button before showing an inline **Pay 250 ⭐ Stars** button. Tapping it creates the recurring Telegram Stars invoice link and replaces the message with a supported **Open Stars payment** URL button. Invoice links cannot be opened through `answerCallbackQuery(url=...)` because Telegram returns `URL_INVALID`; the URL button opens the Stars payment screen correctly. The invoice charges **250 Stars per month** with `currency="XTR"`, no external provider token, and `subscription_period=2592000` (30 days). Telegram renews the subscription automatically; access is updated only from a valid `successful_payment` update. It approves only the matching pre-checkout payload, amount, and currency. Telegram requires digital goods/services sold inside Telegram to use Stars.
 
 ## Groq visual captions
 

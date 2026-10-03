@@ -314,9 +314,11 @@ async def request_stars_invoice(callback: CallbackQuery) -> None:
             show_alert=True,
         )
         return
-    await callback.answer(url=invoice_url)
+    # Telegram rejects invoice links in answerCallbackQuery(url=...) with
+    # URL_INVALID. Invoice links must be placed in an inline URL button.
+    await callback.answer()
     await callback.message.edit_text(
-        "Stars payment opened. If Telegram did not open it automatically, tap the button below.",
+        "Your Telegram Stars payment is ready. Tap the button below to open the payment screen.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="Open Stars payment", url=invoice_url)]
