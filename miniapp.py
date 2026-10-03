@@ -35,16 +35,13 @@ async def authenticated_webview_url(
     raw_link: str,
     *,
     client: TelegramClient | None = None,
+    already_started: bool = False,
 ) -> str:
     if not settings.miniapp_capture_enabled:
         raise MiniAppError(
             "Authenticated Mini App capture is not configured by the owner."
         )
     bot_username, app_short_name, start_param = parse_miniapp_link(raw_link)
-    if bot_username not in settings.miniapp_allowed_bots:
-        raise MiniAppError(
-            "This Mini App bot is not on the owner's approved allowlist."
-        )
 
     owns_client = client is None
     if client is None:
@@ -81,7 +78,8 @@ async def authenticated_webview_url(
                 )
             )
         else:
-            await client.send_message(peer, "/start")
+            if not already_started:
+                await client.send_message(peer, "/start")
             messages = await client.get_messages(peer, limit=8)
             selected = None
             for message in messages:

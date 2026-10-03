@@ -12,14 +12,6 @@ def _int_env(name: str, default: int) -> int:
         raise RuntimeError(f"{name} must be an integer") from exc
 
 
-def _csv_env(name: str) -> frozenset[str]:
-    return frozenset(
-        item.strip().lstrip("@").lower()
-        for item in os.getenv(name, "").split(",")
-        if item.strip()
-    )
-
-
 def _ids_env(name: str) -> frozenset[int]:
     try:
         return frozenset(
@@ -58,7 +50,6 @@ class Settings:
     api_id: int | None
     api_hash: str | None
     userbot_session: str | None
-    miniapp_allowed_bots: frozenset[str]
     owner_ids: frozenset[int]
     support_admin_ids: frozenset[int]
     vision_enabled: bool
@@ -124,7 +115,6 @@ class Settings:
             api_id=int(api_id_raw) if api_id_raw else None,
             api_hash=os.getenv("TELEGRAM_API_HASH") or None,
             userbot_session=os.getenv("TELEGRAM_USERBOT_SESSION") or None,
-            miniapp_allowed_bots=_csv_env("MINIAPP_ALLOWED_BOTS"),
             owner_ids=_ids_env("OWNER_IDS"),
             support_admin_ids=_ids_env("SUPPORT_ADMIN_IDS"),
             vision_enabled=_bool_env("ENABLE_REMOTE_VISION", bool(groq_key)),
@@ -139,7 +129,7 @@ class Settings:
 
     @property
     def miniapp_capture_enabled(self) -> bool:
-        return self.userbot_enabled and bool(self.miniapp_allowed_bots)
+        return self.userbot_enabled
 
     @property
     def remote_vision_enabled(self) -> bool:

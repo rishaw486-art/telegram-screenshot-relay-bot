@@ -4,6 +4,9 @@ import html
 import ipaddress
 import socket
 import tempfile
+import tarfile
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -235,9 +238,10 @@ async def capture_web(
 
 
 async def render_file(
-    path: Path, mime_type: str | None, max_bytes: int
+    path: Path, mime_type: str | None, max_bytes: int, *, display_name: str | None = None
 ) -> tuple[bytes, str, str]:
     suffix = path.suffix.lower()
+    display_name = display_name or path.name
     if suffix == ".pdf" or mime_type == "application/pdf":
         try:
             document = fitz.open(path)
@@ -246,7 +250,7 @@ async def render_file(
             page = document.load_page(0)
             pixmap = page.get_pixmap(matrix=fitz.Matrix(1.35, 1.35), alpha=False)
             image = pixmap.tobytes("png")
-            title = document.metadata.get("title") or path.name
+            title = document.metadata.get("title") or display_name
             text = (
                 " ".join(page.get_text().split())[:700]
                 or "First page of PDF rendered as an image."
@@ -254,12 +258,12 @@ async def render_file(
             if len(image) > max_bytes:
                 raise CaptureError("The rendered PDF page is too large to send.")
             return image, title[:250], text
-        except CaptureError:
-            raise
-        except Exception as exc:
-            raise CaptureError(
-                "Could not render this PDF; it may be encrypted or malformed."
-            ) from exc
+        except CaptureError as exc:
+            if "too large" in str(exc).lower():
+                raise
+            return await _render_file_metadata(path, mime_type, max_bytes, display_name)
+        except Exception:
+            return await _render_file_metadata(path, mime_type, max_bytes, display_name)
     if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"} or (
         mime_type or ""
     ).startswith("image/"):
@@ -281,35 +285,187 @@ async def render_file(
                     raise CaptureError(
                         "The image is too large to send after conversion."
                     )
-                return result, path.name, f"Image preview, {width} × {height} pixels."
+                return result, display_name, f"Image preview, {width} × {height} pixels."
         except CaptureError:
             raise
         except Exception as exc:
-            raise CaptureError("Could not open this image file.") from exc
-    if suffix in {".txt", ".md", ".csv", ".log"} or mime_type in {
-        "text/plain",
-        "text/markdown",
-        "text/csv",
-    }:
+            return await _render_file_metadata(path, mime_type, max_bytes, display_name)
+    if suffix in {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".epub"}:
+        try:
+            text = _extract_office_text(path, suffix)
+            if text.strip():
+                return await _render_text_preview(
+                    display_name, text[:9000], max_bytes, "Document contents extracted safely."
+                )
+        except (OSError, zipfile.BadZipFile, ET.ParseError, RuntimeError, ValueError):
+            # Malformed, encrypted, or over-sized containers fall through to a safe metadata card.
+            pass
+    if suffix in {".zip", ".epub", ".tar", ".tgz", ".gz", ".bz2", ".xz"}:
+        try:
+            names = _archive_listing(path)
+            summary = "Archive contents (names only; no files were extracted):\n" + "\n".join(names)
+            return await _render_text_preview(
+                display_name, summary[:9000], max_bytes, "Archive listing; contents were not extracted."
+            )
+        except (OSError, zipfile.BadZipFile, tarfile.ReadError, RuntimeError):
+            pass
+
+    if _looks_like_text(path, suffix, mime_type):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")[:9000]
-            document = f"<html><body><pre style='white-space:pre-wrap;font:15px monospace'>{html.escape(text)}</pre></body></html>"
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                temp_png = Path(tmp.name)
-            try:
-                await _render_html(document, temp_png)
-                data = temp_png.read_bytes()
-            finally:
-                temp_png.unlink(missing_ok=True)
-            if len(data) > max_bytes:
-                raise CaptureError("The rendered file is too large to send.")
-            return data, path.name, "Text-file preview rendered as an image."
-        except CaptureError:
-            raise
-        except Exception as exc:
-            raise CaptureError("Could not render this text file.") from exc
-    raise CaptureError(
-        "Unsupported file type. MVP supports images, PDFs, and text files; it will not execute files."
+            return await _render_text_preview(
+                display_name, text, max_bytes, "Text preview rendered safely."
+            )
+        except OSError:
+            pass
+
+    return await _render_file_metadata(path, mime_type, max_bytes, display_name)
+
+
+def _looks_like_text(path: Path, suffix: str, mime_type: str | None) -> bool:
+    if suffix in {
+        ".exe", ".dll", ".so", ".dylib", ".bin", ".apk", ".app", ".msi",
+        ".deb", ".rpm", ".class", ".pyc", ".wasm", ".iso", ".dmg",
+        ".tgs", ".webm", ".mp4", ".mkv", ".mov", ".mp3", ".m4a", ".ogg",
+        ".opus", ".wav", ".flac", ".aac", ".amr", ".avi", ".heic", ".heif",
+    }:
+        return False
+    if suffix in {
+        ".txt", ".md", ".csv", ".log", ".json", ".jsonl", ".xml", ".html",
+        ".htm", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".py", ".js",
+        ".ts", ".css", ".sql", ".sh", ".toml", ".rst", ".tex", ".eml",
+    } or (mime_type or "").startswith("text/"):
+        return True
+    try:
+        with path.open("rb") as file:
+            return b"\x00" not in file.read(4096)
+    except OSError:
+        return False
+
+
+def _extract_office_text(path: Path, suffix: str) -> str:
+    """Extract bounded textual XML from OpenXML/OpenDocument/EPUB ZIP containers."""
+    with zipfile.ZipFile(path) as archive:
+        infos = archive.infolist()
+        if len(infos) > 5000:
+            raise ValueError("Container has too many entries")
+        output: list[str] = []
+        total = 0
+
+        def xml_text(member: str) -> str:
+            nonlocal total
+            info = archive.getinfo(member)
+            if info.file_size > 2_000_000 or total + info.file_size > 6_000_000:
+                return ""
+            with archive.open(info) as stream:
+                raw = stream.read(2_000_001)
+            total += len(raw)
+            root = ET.fromstring(raw)
+            return " ".join(
+                value.strip()
+                for element in root.iter()
+                for value in [element.text or ""]
+                if value.strip()
+            )
+
+        if suffix == ".docx":
+            members = ["word/document.xml"]
+        elif suffix == ".pptx":
+            members = sorted(
+                (name for name in archive.namelist() if name.startswith("ppt/slides/slide") and name.endswith(".xml")),
+                key=lambda name: int(Path(name).stem.removeprefix("slide")) if Path(name).stem.removeprefix("slide").isdigit() else 0,
+            )[:30]
+        elif suffix == ".xlsx":
+            members = ["xl/sharedStrings.xml"] + sorted(
+                name for name in archive.namelist()
+                if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
+            )[:20]
+        elif suffix in {".odt", ".ods", ".odp"}:
+            members = ["content.xml"]
+        else:
+            members = sorted(
+                name for name in archive.namelist()
+                if name.lower().endswith((".html", ".xhtml", ".xml", ".txt"))
+            )[:20]
+        for member in members:
+            if member in archive.namelist():
+                extracted = xml_text(member)
+                if extracted:
+                    output.append(extracted)
+        return "\n".join(output)[:9000]
+
+
+def _archive_listing(path: Path) -> list[str]:
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            if len(infos) > 5000:
+                return [f"Archive contains {len(infos)} entries; listing capped for safety."]
+            return [
+                f"{info.filename[:180]} ({info.file_size:,} bytes)"
+                for info in infos[:100]
+            ] or ["The archive is empty."]
+    if tarfile.is_tarfile(path):
+        with tarfile.open(path, mode="r:*") as archive:
+            members = archive.getmembers()
+            if len(members) > 5000:
+                return [f"Archive contains {len(members)} entries; listing capped for safety."]
+            return [
+                f"{member.name[:180]} ({member.size:,} bytes)"
+                for member in members[:100]
+            ] or ["The archive is empty."]
+    raise tarfile.ReadError("Unsupported or malformed archive")
+
+
+async def _render_text_preview(
+    title: str, text: str, max_bytes: int, description: str
+) -> tuple[bytes, str, str]:
+    document = (
+        "<html><body style='margin:24px;font:15px monospace;white-space:pre-wrap;"
+        "overflow-wrap:anywhere'>" + html.escape(text) + "</body></html>"
+    )
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        temp_png = Path(tmp.name)
+    try:
+        await _render_html(document, temp_png)
+        data = temp_png.read_bytes()
+    finally:
+        temp_png.unlink(missing_ok=True)
+    if len(data) > max_bytes:
+        raise CaptureError("The rendered file is too large to send.")
+    return data, title[:250], description
+
+
+async def _render_file_metadata(
+    path: Path, mime_type: str | None, max_bytes: int, display_name: str
+) -> tuple[bytes, str, str]:
+    size = path.stat().st_size
+    with path.open("rb") as file:
+        signature = file.read(16)
+    signatures = (
+        (b"%PDF-", "PDF document"),
+        (b"\x89PNG\r\n\x1a\n", "PNG image"),
+        (b"\xff\xd8\xff", "JPEG image"),
+        (b"GIF87a", "GIF image"),
+        (b"GIF89a", "GIF image"),
+        (b"PK\x03\x04", "ZIP-based container"),
+        (b"\x1f\x8b", "GZIP archive"),
+        (b"MZ", "Windows executable format (not executed)"),
+        (b"\x7fELF", "Linux executable format (not executed)"),
+        (b"ID3", "MP3 audio"),
+    )
+    detected = next((label for prefix, label in signatures if signature.startswith(prefix)), None)
+    if not detected and len(signature) >= 12 and signature[4:8] == b"ftyp":
+        detected = "MP4-family media"
+    report = (
+        f"File: {display_name}\n"
+        f"Reported MIME type: {mime_type or 'unknown'}\n"
+        f"Detected type: {detected or 'unrecognized binary or specialized format'}\n"
+        f"Size: {size:,} bytes\n\n"
+        "This format is not text-extracted by the safe previewer. The file was not executed, opened as a program, or extracted."
+    )
+    return await _render_text_preview(
+        display_name, report, max_bytes, "Safe file information preview; contents were not executed."
     )
 
 

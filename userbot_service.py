@@ -142,6 +142,109 @@ class UserbotService:
             else "the connected account"
         )
 
+    async def inspect_public_bot(self, requester_id: int, username: str) -> dict[str, Any]:
+        """Send /start to a public bot and summarize its latest reply without clicking controls."""
+        if not self.client.is_connected() or self._self_id is None:
+            raise UserbotSendError("The userbot is offline. Please try again later.")
+        normalized = username.strip().lstrip("@").lower()
+        if not re.fullmatch(r"[a-z0-9_]{5,32}", normalized):
+            raise UserbotSendError("Please use a valid public Telegram bot username.")
+        try:
+            entity = await self.client.get_entity(normalized)
+        except Exception as exc:
+            raise UserbotSendError("I could not resolve that public Telegram username.") from exc
+        if not isinstance(entity, types.User) or not getattr(entity, "bot", False):
+            raise UserbotSendError("That public username is not a Telegram bot account.")
+        if int(entity.id) == self._self_id:
+            raise UserbotSendError("The connected account cannot inspect itself.")
+
+        async with self._send_lock:
+            now = asyncio.get_running_loop().time()
+            previous = self._last_by_requester.get(requester_id, 0.0)
+            if now - previous < 10:
+                remaining = int(10 - (now - previous)) + 1
+                raise UserbotSendError(
+                    f"Please wait {remaining} seconds before another userbot action."
+                )
+            global_wait = 2 - (now - self._last_global_send)
+            if global_wait > 0:
+                await asyncio.sleep(global_wait)
+            try:
+                sent = await self.client.send_message(entity, "/start")
+                self._last_by_requester[requester_id] = asyncio.get_running_loop().time()
+                self._last_global_send = self._last_by_requester[requester_id]
+                received = []
+                for _ in range(5):
+                    await asyncio.sleep(1)
+                    history = await self.client.get_messages(entity, limit=12)
+                    received = [
+                        item
+                        for item in reversed(history)
+                        if item.id > sent.id
+                        and item.sender_id == int(entity.id)
+                        and not getattr(item, "out", False)
+                    ]
+                    if received:
+                        break
+            except FloodWaitError as exc:
+                raise UserbotSendError(
+                    f"Telegram rate-limited bot inspection. Try again in about {exc.seconds} seconds."
+                ) from exc
+            except RPCError as exc:
+                log.warning(
+                    "userbot bot inspection rejected target=%s error=%s",
+                    normalized,
+                    type(exc).__name__,
+                )
+                raise UserbotSendError(
+                    "Telegram did not allow the connected account to open that bot."
+                ) from exc
+            except UserbotSendError:
+                raise
+            except Exception as exc:
+                log.warning(
+                    "userbot bot inspection failed target=%s error=%s",
+                    normalized,
+                    type(exc).__name__,
+                )
+                raise UserbotSendError(
+                    "The connected account could not inspect that bot."
+                ) from exc
+
+        replies: list[str] = []
+        button_labels: list[str] = []
+        has_media = False
+        has_webapp_button = False
+        for item in received[:6]:
+            body = " ".join((getattr(item, "raw_text", None) or "").split())
+            if body:
+                replies.append(body[:800])
+            elif getattr(item, "media", None):
+                has_media = True
+            markup = getattr(item, "reply_markup", None)
+            for row in getattr(markup, "rows", []) if markup else []:
+                for button in getattr(row, "buttons", []):
+                    button_type = type(button).__name__.lower()
+                    label = " ".join((getattr(button, "text", None) or "").split())
+                    if label and label not in button_labels:
+                        button_labels.append(label[:80])
+                    if "webview" in button_type or "web_app" in button_type:
+                        has_webapp_button = True
+                    if len(button_labels) >= 12:
+                        break
+                if len(button_labels) >= 12:
+                    break
+
+        return {
+            "username": normalized,
+            "name": " ".join((getattr(entity, "first_name", None) or "").split())[:120],
+            "replies": replies,
+            "buttons": button_labels,
+            "has_media": has_media,
+            "has_webapp_button": has_webapp_button,
+            "responded": bool(received),
+        }
+
     async def _on_new_private_message(self, event: Any) -> None:
         if not event.is_private or not event.sender_id:
             return

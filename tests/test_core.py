@@ -1,19 +1,31 @@
 import asyncio
 import sqlite3
 import time
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import capture
 import health_server
 import storage
+import userbot_service
 import vision
+from telethon import types
 from app_settings import Settings
 from health_server import HealthServer
-from miniapp import parse_miniapp_link
+from link_utils import extract_public_url
+from miniapp import authenticated_webview_url, parse_miniapp_link
 from storage import Store
 from vision import describe_image
+
+
+def test_extract_public_url_normalizes_bare_and_www_links():
+    assert extract_public_url("Check example.com/a?x=1.") == "https://example.com/a?x=1"
+    assert extract_public_url("www.example.org/docs") == "https://www.example.org/docs"
+    assert extract_public_url("https://example.net/path)") == "https://example.net/path"
+    assert extract_public_url("just some text") is None
 
 
 def test_apiflash_capture_posts_key_and_requests_full_page_png(monkeypatch):
@@ -106,11 +118,157 @@ def test_apiflash_capture_handles_missing_key_and_oversized_image(monkeypatch):
         )
 
 
+def test_office_file_preview_extracts_text_without_executing(monkeypatch, tmp_path: Path):
+    docx = tmp_path / "report.docx"
+    with zipfile.ZipFile(docx, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="urn:word"><w:t>Quarterly report</w:t></w:document>',
+        )
+    captured = {}
+
+    async def fake_preview(title, text, max_bytes, description):
+        captured.update(title=title, text=text, max_bytes=max_bytes, description=description)
+        return b"preview", title, description
+
+    monkeypatch.setattr(capture, "_render_text_preview", fake_preview)
+    result = asyncio.run(
+        capture.render_file(docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 1000)
+    )
+    assert result[0] == b"preview"
+    assert captured["title"] == "report.docx"
+    assert "Quarterly report" in captured["text"]
+
+
+def test_unknown_binary_file_gets_metadata_only_preview(monkeypatch, tmp_path: Path):
+    binary = tmp_path / "tool.exe"
+    binary.write_bytes(b"MZ" + bytes([0]) + b"binary data")
+    captured = {}
+
+    async def fake_preview(title, text, max_bytes, description):
+        captured.update(title=title, text=text, description=description)
+        return b"preview", title, description
+
+    monkeypatch.setattr(capture, "_render_text_preview", fake_preview)
+    result = asyncio.run(capture.render_file(binary, "application/octet-stream", 1000))
+    assert result[0] == b"preview"
+    assert "Windows executable format (not executed)" in captured["text"]
+    assert "was not executed" in captured["text"]
+
+
+def test_userbot_bot_inspection_reads_start_reply_and_webapp_button(monkeypatch):
+    bot_entity = types.User(
+        id=42, access_hash=1, first_name="Demo Bot", username="demobot", bot=True
+    )
+
+    class KeyboardButtonWebView:
+        text = "Open Mini App"
+        url = "https://app.example/"
+
+    reply = SimpleNamespace(
+        id=11,
+        sender_id=42,
+        out=False,
+        raw_text="Welcome to the demo bot.",
+        media=None,
+        reply_markup=SimpleNamespace(
+            rows=[SimpleNamespace(buttons=[KeyboardButtonWebView()])]
+        ),
+    )
+
+    class FakeClient:
+        sent = None
+
+        def is_connected(self):
+            return True
+
+        async def get_entity(self, username):
+            assert username == "demobot"
+            return bot_entity
+
+        async def send_message(self, entity, text):
+            self.sent = text
+            return SimpleNamespace(id=10)
+
+        async def get_messages(self, entity, limit):
+            return [reply]
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(userbot_service.asyncio, "sleep", no_sleep)
+    service = userbot_service.UserbotService.__new__(userbot_service.UserbotService)
+    service.client = FakeClient()
+    service._self_id = 7
+    service._send_lock = asyncio.Lock()
+    service._last_by_requester = {}
+    service._last_global_send = 0.0
+    inspection = asyncio.run(service.inspect_public_bot(100, "@DemoBot"))
+    assert service.client.sent == "/start"
+    assert inspection["name"] == "Demo Bot"
+    assert inspection["replies"] == ["Welcome to the demo bot."]
+    assert inspection["buttons"] == ["Open Mini App"]
+    assert inspection["has_webapp_button"] is True
+
+
 def test_parse_direct_miniapp_link():
     bot, app, start = parse_miniapp_link(
         "https://t.me/example_bot/preview?startapp=abc123"
     )
     assert (bot, app, start) == ("example_bot", "preview", "abc123")
+
+
+def test_authenticated_webview_opens_unallowlisted_public_bot(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:fake")
+    monkeypatch.setenv("BOT_USERNAME", "testbot")
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "test-hash")
+    monkeypatch.setenv("TELEGRAM_USERBOT_SESSION", "test-session")
+    monkeypatch.delenv("MINIAPP_ALLOWED_BOTS", raising=False)
+    settings = Settings.from_env()
+
+    class KeyboardButtonWebView:
+        text = "Open"
+        url = "https://mini.example/"
+
+    reply = SimpleNamespace(
+        id=22,
+        reply_markup=SimpleNamespace(
+            rows=[SimpleNamespace(buttons=[KeyboardButtonWebView()])]
+        ),
+    )
+
+    class FakeClient:
+        sent = []
+
+        def is_connected(self):
+            return True
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_input_entity(self, username):
+            assert username == "outside_allowlist_bot"
+            return types.InputPeerUser(user_id=42, access_hash=1)
+
+        async def send_message(self, peer, text):
+            self.sent.append(text)
+
+        async def get_messages(self, peer, limit):
+            return [reply]
+
+        async def __call__(self, request):
+            return SimpleNamespace(url="https://mini.example/launch?auth=private")
+
+    client = FakeClient()
+    result = asyncio.run(
+        authenticated_webview_url(
+            settings, "https://t.me/outside_allowlist_bot", client=client
+        )
+    )
+    assert result == "https://mini.example/launch?auth=private"
+    assert client.sent == ["/start"]
 
 
 def test_parse_bot_link_without_app():
@@ -247,6 +405,19 @@ def test_apiflash_api_key_is_read_from_environment(monkeypatch):
     monkeypatch.setenv("APIFLASH_API_KEY", "  test-apiflash-key  ")
     settings = Settings.from_env()
     assert settings.apiflash_api_key == "test-apiflash-key"
+
+
+def test_miniapp_capture_requires_userbot_but_not_allowlist(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:fake")
+    monkeypatch.setenv("BOT_USERNAME", "testbot")
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "test-hash")
+    monkeypatch.setenv("TELEGRAM_USERBOT_SESSION", "test-session")
+    monkeypatch.delenv("MINIAPP_ALLOWED_BOTS", raising=False)
+    settings = Settings.from_env()
+    assert settings.userbot_enabled
+    assert settings.miniapp_capture_enabled
 
 
 def test_groq_is_default_vision_provider_when_api_key_is_set(monkeypatch):

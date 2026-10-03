@@ -32,6 +32,7 @@ from app_settings import Settings
 from billing import SendRecurringStarsInvoice
 from capture import CaptureError, capture_web, capture_website_apiflash, render_file
 from health_server import HealthServer, self_ping_loop
+from link_utils import extract_public_url
 from miniapp import MiniAppError, authenticated_webview_url, parse_miniapp_link
 from storage import Store
 from userbot_service import UserbotSendError, UserbotService
@@ -68,13 +69,6 @@ def _user_tag(message: Message) -> str:
     if user.username:
         return "@" + user.username
     return _escape(user.full_name or "Telegram user")
-
-
-def _safe_url_from_text(text: str) -> str | None:
-    match = re.search(r"https?://[^\s<>]+", text, flags=re.I)
-    if not match:
-        return None
-    return match.group(0).rstrip(".,;!?)]}")
 
 
 async def _paid_or_prompt(message: Message) -> bool:
@@ -235,15 +229,14 @@ async def start(message: Message, command: CommandObject) -> None:
         return
     if is_new_user:
         await message.answer(
-            "Welcome! You have one free screenshot preview. Invite 3 new users with /referral to earn one more preview. Use /buy for unlimited access.\n\n"
-            "Send a website link, supported file, or approved Mini App to use your preview."
+            "Welcome! You have one free preview. Invite 3 new users with /referral to earn another, or use /buy for unlimited premium access at 250 Stars/month.\n\n"
+            "Send a website link, Telegram bot username/link, Mini App link, or file to get a safe preview or inspection."
             + (f"\n\n{referral_text}" if referral_text else "")
         )
         return
     await message.answer(
-        "Hi! I can capture screenshots and short descriptions of public websites, supported files, "
-        "and approved Telegram Mini Apps. Use /buy to unlock paid features or /referral to earn free screenshot previews.\n\n"
-        "Commands: /buy, /status, /referral, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy."
+        "Hi! I can preview public web links and files, inspect public Telegram bots, and open Mini Apps from links. Use /buy for unlimited access at 250 Stars/month or /referral to earn free previews.\n\n"
+        "Commands: /buy, /terms, /status, /referral, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy."
     )
 
 
@@ -252,11 +245,46 @@ async def buy(message: Message) -> None:
     if message.from_user and message.from_user.id in settings.owner_ids:
         await message.answer("Owner access is free and unlimited.")
         return
+    await message.answer(
+        "Premium costs 250 Telegram Stars and renews every 30 days until canceled. "
+        "Review /terms, then confirm below to receive the invoice.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="I agree — continue to invoice", callback_data="buy_terms:agree")],
+                [InlineKeyboardButton(text="Read /terms", callback_data="buy_terms:terms")],
+            ]
+        ),
+    )
+
+
+@dp.callback_query(F.data == "buy_terms:terms")
+async def show_purchase_terms(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "<b>Premium subscription terms</b>\n"
+            "Price: 250 Telegram Stars every 30 days (recurring).\n"
+            "Premium grants unlimited access to the bot's current preview, inspection, and messaging features while active.\n"
+            "Renewal can be canceled with /cancel; access remains until the paid period expires.\n"
+            "For payment questions, use /paysupport. Privacy details are available with /privacy."
+        )
+
+
+@dp.callback_query(F.data == "buy_terms:agree")
+async def accept_purchase_terms(callback: CallbackQuery) -> None:
+    if not callback.from_user or not isinstance(callback.message, Message):
+        await callback.answer("Could not identify this purchase chat.", show_alert=True)
+        return
+    await callback.answer()
+    if callback.from_user.id in settings.owner_ids:
+        await callback.message.answer("Owner access is free and unlimited.")
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
     await bot(
         SendRecurringStarsInvoice(
-            chat_id=message.chat.id,
-            title="30-day bot access",
-            description="One month of screenshot, supported-file preview, and userbot messaging service.",
+            chat_id=callback.message.chat.id,
+            title="Premium access (1 month)",
+            description="Unlimited website and file previews, Telegram bot inspection, Mini App capture, and userbot messaging for one month.",
             payload="subscription_30d_250_xtr_v1",
             currency="XTR",
             provider_token="",
@@ -264,8 +292,19 @@ async def buy(message: Message) -> None:
             subscription_period=SUBSCRIPTION_PERIOD,
         )
     )
+    await callback.message.answer(
+        "Your 250-Star monthly invoice is ready. Access starts only after Telegram confirms payment."
+    )
+
+
+@dp.message(Command("terms"))
+async def terms_command(message: Message) -> None:
     await message.answer(
-        "Your invoice is ready. Access is enabled only after Telegram confirms payment."
+        "<b>Premium subscription terms</b>\n"
+        "Price: 250 Telegram Stars every 30 days (recurring).\n"
+        "Premium grants unlimited access to the bot's current preview, inspection, and messaging features while active.\n"
+        "Renewal can be canceled with /cancel; access remains until the paid period expires.\n"
+        "For payment questions, use /paysupport. Privacy details are available with /privacy."
     )
 
 
@@ -287,7 +326,7 @@ async def status(message: Message) -> None:
         await message.answer(
             f"Your subscription is inactive or expired. Free screenshot previews remaining: {credits['free_uses']}. "
             f"Successful referrals: {credits['referral_count']} ({credits['referral_count'] % 3}/3 toward the next preview). "
-            "Use /referral or /buy to subscribe for 250 Stars per 30 days."
+            "Use /referral or /buy for unlimited access at 250 Stars/month (recurring every 30 days)."
         )
 
 
@@ -405,7 +444,7 @@ async def successful_payment(message: Message) -> None:
         f"\nAccess until: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(expiration))}"
     )
     await message.answer(
-        f"Payment confirmed. Your access is active until <code>{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(expiration))}</code>. Send a website link or supported file to begin."
+        f"Payment confirmed. Your access is active until <code>{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(expiration))}</code>. Send a web link, Telegram bot/Mini App link, or any file to begin."
     )
 
 
@@ -640,20 +679,20 @@ async def _process_link(message: Message, raw_url: str) -> None:
     host = (parsed.hostname or "").lower()
     if host in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
         try:
-            username, appname, _ = parse_miniapp_link(raw_url)
+            username, appname, start_param = parse_miniapp_link(raw_url)
         except MiniAppError:
             await message.answer(
                 "I could not identify a public Telegram bot or Mini App in that link."
             )
             return
-        if appname or username in settings.miniapp_allowed_bots:
+        if appname or start_param:
             if not settings.miniapp_capture_enabled:
                 await message.answer(
                     "This Telegram link appears to be a Mini App, but the owner has not configured the dedicated userbot capture integration."
                 )
                 return
             await message.answer(
-                "Opening the approved Mini App securely and capturing its initial screen…"
+                "Opening this Mini App using the configured Telegram account and capturing its initial screen. The app may receive that account's Telegram identity and Mini App launch data."
             )
             try:
                 authenticated_url = await authenticated_webview_url(
@@ -675,23 +714,12 @@ async def _process_link(message: Message, raw_url: str) -> None:
             except Exception as exc:
                 log.warning("miniapp capture failed error=%s", type(exc).__name__)
                 await message.answer(
-                    "Mini App capture failed. It may require Telegram's native WebView bridge or a manual owner-approved login."
+                    "Mini App capture failed. It may require Telegram's native WebView bridge or an interactive login by the account owner."
                 )
             finally:
                 authenticated_url = None
             return
-        username = parsed.path.strip("/").split("/")[0].lstrip("@").lower()
-        try:
-            chat = await bot.get_chat("@" + username)
-            bio = getattr(chat, "bio", None) or "No public description is available."
-            title = getattr(chat, "full_name", None) or "Telegram bot profile"
-            await message.answer(
-                f"<b>{_escape(title)}</b>\n{_escape(bio[:700])}\nhttps://t.me/{_escape(username)}\n\nA chat screenshot or Mini App screenshot requires the userbot integration and an approved Mini App link."
-            )
-        except Exception:
-            await message.answer(
-                "That is a Telegram bot/chat link, not a normal web page. I cannot capture a native Telegram screen without an approved Mini App capture setup."
-            )
+        await _inspect_telegram_bot(message, username)
         return
     await message.answer("Asking ApiFlash to capture the website…")
     try:
@@ -711,19 +739,126 @@ async def _process_link(message: Message, raw_url: str) -> None:
         )
 
 
+async def _inspect_telegram_bot(message: Message, username: str) -> None:
+    """Ask a public bot for its /start screen and relay a bounded, escaped summary."""
+    if userbot_service is None:
+        try:
+            chat = await bot.get_chat("@" + username)
+            title = getattr(chat, "full_name", None) or "Telegram bot"
+            bio = getattr(chat, "bio", None) or "No public description is available."
+            await message.answer(
+                f"<b>{_escape(title)}</b>\n{_escape(bio[:700])}\n"
+                f"https://t.me/{_escape(username)}\n\n"
+                "Full bot inspection requires the configured userbot account."
+            )
+        except Exception:
+            await message.answer(
+                "I could not resolve that Telegram username. Try a public bot username or t.me link."
+            )
+        return
+
+    await message.answer(
+        f"If @{_escape(username)} is a public bot, the connected Telegram account will send /start and the bot can see that account's identity. "
+        "I will only read recent replies and button labels; I will not submit forms or make purchases."
+    )
+    try:
+        inspection = await userbot_service.inspect_public_bot(
+            message.from_user.id if message.from_user else 0, username
+        )
+    except UserbotSendError as exc:
+        if "not a Telegram bot account" in str(exc):
+            try:
+                chat = await bot.get_chat("@" + username)
+                title = getattr(chat, "full_name", None) or username
+                bio = getattr(chat, "bio", None) or "No public description is available."
+                await message.answer(
+                    f"<b>Public Telegram profile: {_escape(title)}</b>\n"
+                    f"{_escape(bio[:700])}\nhttps://t.me/{_escape(username)}\n\n"
+                    "This username is not a bot, so the connected account did not send /start."
+                )
+                return
+            except Exception:
+                pass
+        await message.answer(_escape(str(exc)))
+        return
+    except Exception as exc:
+        log.warning("bot inspection failed error=%s", type(exc).__name__)
+        await message.answer("I could not inspect that bot right now.")
+        return
+
+    name = inspection.get("name") or username
+    lines = [f"<b>Bot inspection: @{_escape(username)}</b>", f"Name: {_escape(name)}"]
+    replies = inspection.get("replies", [])
+    if replies:
+        lines.append("<b>What it replied to /start:</b>")
+        lines.extend("• " + _escape(text[:700]) for text in replies[:5])
+    elif inspection.get("responded"):
+        lines.append("The bot responded with media but no readable text.")
+    else:
+        lines.append("The bot did not send a readable reply within five seconds.")
+    buttons = inspection.get("buttons", [])
+    if buttons:
+        lines.append("<b>Buttons shown:</b> " + " · ".join(_escape(label) for label in buttons[:10]))
+    if inspection.get("has_media"):
+        lines.append("It also sent media or an attachment; this inspection did not download it.")
+    lines.append(
+        "This is a summary of its public /start response, not a security review or verification of the bot's claims."
+    )
+    await message.answer("\n".join(lines)[:3900])
+    if inspection.get("has_webapp_button"):
+        await message.answer(
+            "The bot also offered a Mini App. Opening the first available WebApp button with the connected account; the app may receive that account's Telegram identity and launch data."
+        )
+        authenticated_url = None
+        try:
+            authenticated_url = await authenticated_webview_url(
+                settings,
+                "https://t.me/" + username,
+                client=userbot_service.client,
+                already_started=True,
+            )
+            image, title, description = await capture_web(
+                authenticated_url,
+                settings.page_timeout_seconds,
+                settings.max_screenshot_bytes,
+                strict_origin=True,
+            )
+            await _send_preview(
+                message, image, title or f"Mini App: @{username}", description
+            )
+        except (MiniAppError, CaptureError) as exc:
+            await message.answer(_escape(str(exc)))
+        except Exception as exc:
+            log.warning("inspected bot Mini App capture failed error=%s", type(exc).__name__)
+            await message.answer("I could not capture that bot's Mini App.")
+        finally:
+            authenticated_url = None
+
+
 async def _download_file(
     message: Message, file_id: str, mime_type: str | None, file_name: str | None
 ) -> None:
-    file = await bot.get_file(file_id)
+    try:
+        file = await bot.get_file(file_id)
+    except Exception as exc:
+        log.warning("Telegram file lookup failed error=%s", type(exc).__name__)
+        await message.answer("Telegram could not provide that file for safe preview.")
+        return
     if file.file_size and file.file_size > settings.max_upload_bytes:
         await message.answer(
             "That file exceeds the upload limit and was not downloaded."
         )
         return
-    suffix = Path(file_name or "upload.bin").suffix[:12] or ".bin"
+    display_name = (file_name or "upload.bin").replace("\\", "/").split("/")[-1][:255]
+    suffix = Path(display_name).suffix[:12] or ".bin"
     with tempfile.TemporaryDirectory(prefix="tg-preview-") as temp_dir:
         path = Path(temp_dir) / ("upload" + suffix)
-        await bot.download_file(file.file_path, destination=path)
+        try:
+            await bot.download_file(file.file_path, destination=path)
+        except Exception as exc:
+            log.warning("Telegram file download failed error=%s", type(exc).__name__)
+            await message.answer("The attachment could not be downloaded; no preview was made.")
+            return
         if path.stat().st_size > settings.max_upload_bytes:
             await message.answer(
                 "That file exceeds the upload limit and was not processed."
@@ -731,11 +866,19 @@ async def _download_file(
             return
         try:
             image, title, description = await render_file(
-                path, mime_type, settings.max_screenshot_bytes
+                path,
+                mime_type,
+                settings.max_screenshot_bytes,
+                display_name=display_name,
             )
             await _send_preview(message, image, title, description)
         except CaptureError as exc:
             await message.answer(_escape(str(exc)))
+        except Exception as exc:
+            log.warning("file preview failed error=%s", type(exc).__name__)
+            await message.answer(
+                "I could not safely generate a preview for that file. The temporary download was deleted."
+            )
 
 
 @dp.message(F.photo)
@@ -768,9 +911,39 @@ async def document_message(message: Message) -> None:
 async def unsupported_media_message(message: Message) -> None:
     if await _relay_incoming(message):
         return
-    await message.answer(
-        "I received this media, but screenshot previews currently support images, PDFs, and text files. This file was not executed or retained."
+    media = (
+        message.video
+        or message.audio
+        or message.voice
+        or message.animation
+        or message.video_note
+        or message.sticker
     )
+    if not media:
+        await message.answer("I could not read that media attachment.")
+        return
+    if not await _preview_or_prompt(message):
+        return
+    file_name = getattr(media, "file_name", None)
+    mime_type = getattr(media, "mime_type", None)
+    if message.voice:
+        file_name = file_name or "voice-message.ogg"
+        mime_type = mime_type or "audio/ogg"
+    elif message.video_note:
+        file_name = file_name or "video-note.mp4"
+        mime_type = mime_type or "video/mp4"
+    elif message.sticker:
+        sticker = message.sticker
+        if getattr(sticker, "is_animated", False):
+            file_name = file_name or "sticker.tgs"
+        elif getattr(sticker, "is_video", False):
+            file_name = file_name or "sticker.webm"
+        else:
+            file_name = file_name or "sticker.webp"
+    else:
+        file_name = file_name or "telegram-media.bin"
+    await message.answer("Preparing a safe media preview or file information card…")
+    await _download_file(message, media.file_id, mime_type, file_name)
 
 
 @dp.message(F.text & ~F.text.startswith("/"))
@@ -799,7 +972,7 @@ async def text_message(message: Message) -> None:
     if await _relay_incoming(message):
         return
     text = (message.text or "").strip()
-    url = _safe_url_from_text(text)
+    url = extract_public_url(text)
     if url:
         host = (urlparse(url).hostname or "").lower()
         if (
@@ -819,40 +992,13 @@ async def text_message(message: Message) -> None:
         username = username_parts[0].lower() if username_parts else ""
         if not re.fullmatch(r"[a-z0-9_]{5,32}", username):
             await message.answer(
-                "Send a valid Telegram username, website URL, or supported file."
+        "Send a valid public Telegram username, website link, or file."
             )
             return
         if not await _preview_or_prompt(message):
             return
-        if (
-            username in settings.miniapp_allowed_bots
-            and settings.miniapp_capture_enabled
-        ):
-            await message.answer(
-                "I will check this approved bot for a Mini App button…"
-            )
-            try:
-                authenticated_url = await authenticated_webview_url(
-                    settings,
-                    "https://t.me/" + username,
-                    client=userbot_service.client if userbot_service else None,
-                )
-                image, title, description = await capture_web(
-                    authenticated_url,
-                    settings.page_timeout_seconds,
-                    settings.max_screenshot_bytes,
-                    strict_origin=True,
-                )
-                await _send_preview(
-                    message, image, title or f"Mini App: @{username}", description
-                )
-            except (MiniAppError, CaptureError) as exc:
-                await message.answer(_escape(str(exc)))
-            except Exception as exc:
-                log.warning("bot miniapp capture failed error=%s", type(exc).__name__)
-                await message.answer(
-                    "I could not open a Mini App from that bot. It may not provide a supported WebApp button."
-                )
+        if userbot_service is not None:
+            await _inspect_telegram_bot(message, username)
             return
         try:
             chat = await bot.get_chat(text)
@@ -865,7 +1011,7 @@ async def text_message(message: Message) -> None:
             )
         return
     await message.answer(
-        "Send me an http(s) website link, an approved Telegram Mini App link, or a supported image/PDF/text file. New users get one free screenshot preview; use /referral for another. Use /help for commands."
+        "Send me a public website link (with or without https://), a Telegram bot username/link, a Mini App link, or any file. Common documents get content previews; other file types get a safe metadata card. New users get one free preview; use /referral for another. Use /help for commands."
     )
 
 
@@ -891,7 +1037,7 @@ async def owner_help(message: Message) -> None:
         "/gift <user_id> [days] — gift premium access (30 days by default; can be gifted before the user starts the bot)\n"
         "/message <user_id|@username> <text> — message a registered user, or use the userbot for a public username\n"
         "/broadcast <text> — preview, confirm, then send to registered users\n"
-        "Owner access to paid features is free. Bot API recipients must have started the bot; userbot sends can reach public personal usernames."
+        "Owner access to paid features is free. The connected userbot can inspect public bots and open Mini Apps selected by users; its Telegram identity and Mini App data may be shared with those services."
     )
 
 
@@ -1146,7 +1292,7 @@ async def help_command(message: Message) -> None:
         else ""
     )
     await message.answer(
-        "Send a website URL or supported image/PDF/text file for a screenshot and description. New users get one free screenshot preview; invite 3 new users with /referral to earn another.\n\nCommands: /buy, /status, /referral, /cancel, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy.\n\n/send sends through the connected userbot account; the recipient does not need to start this bot and replies return here. The recipient sees the userbot account's identity. /relay is a separate opt-in bot-to-bot mode. Mini App capture uses owner-approved bots and the same dedicated userbot."
+        "Send any public web link, Telegram bot username/link, Mini App link, or file. Common documents are parsed without execution; other formats receive a metadata preview. New users get one free preview; invite 3 new users with /referral to earn another. Use /buy for unlimited access at 250 Stars/month (recurring every 30 days); read /terms.\n\nCommands: /buy, /terms, /status, /referral, /cancel, /send @username message, /relay @username message, /stoprelay, /paysupport, /privacy.\n\n/send sends through the connected userbot account; the recipient does not need to start this bot and replies return here. The recipient sees the userbot account's identity. Public bot inspection sends /start from that account; Mini Apps may receive its Telegram identity and launch data. /relay is a separate opt-in bot-to-bot mode."
         + owner_commands
     )
 
@@ -1165,9 +1311,9 @@ async def privacy_command(message: Message) -> None:
     )
     await message.answer(
         website_notice
-        + "Telegram Mini App screenshots are captured locally; their authenticated launch URLs are not sent to ApiFlash. Uploaded images, PDFs, and text files are downloaded temporarily for preview and deleted after processing; unsupported files are not executed. "
+        + "Telegram bot inspections send /start from the connected userbot account and relay recent replies/button labels; the target bot sees that account. Mini App links are opened without an owner allowlist; a selected app may receive the connected account's identity and Telegram launch data. Mini App screenshots are captured locally; their authenticated launch URLs are not sent to ApiFlash. Files are downloaded temporarily and deleted after processing; supported documents are parsed without execution, and unfamiliar formats get a metadata-only preview. "
         + vision_notice
-        + " For /send, your message is sent by the dedicated userbot account, whose identity is visible to the recipient; replies and supported attachments from that chat are forwarded back to you. The reply route can be stopped with /stoprelay and expires after 30 days without activity. For an approved Mini App, the same account opens the app; it may receive the account's Telegram profile/init data. The authenticated launch URL is not returned to you or intentionally logged. Do not send links or files you are not authorized to share."
+        + " For /send, your message is sent by the dedicated userbot account, whose identity is visible to the recipient; replies and supported attachments from that chat are forwarded back to you. The reply route can be stopped with /stoprelay and expires after 30 days without activity. Any Mini App requested by a user may receive that account's Telegram profile/init data. The authenticated launch URL is not returned to you or intentionally logged. Do not send links or files you are not authorized to share."
     )
 
 
