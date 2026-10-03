@@ -141,6 +141,28 @@ def _escape(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+START_MESSAGE = (
+    "<b>Hello Sir, I am your automated preview and interaction assistant. "
+    "I can inspect web pages, bots, and facilitate secure user communications.</b>\n\n"
+    "<i>💎 Get Unlimited Access:</i>\n"
+    "Skip usage limits with /buy for 250 Stars/month or share your link with /referral "
+    "to get free preview passes!"
+)
+
+
+TERMS_MESSAGE = (
+    "<b>Premium subscription terms</b>\n"
+    "<i>Price:</i> 250 Telegram Stars every 30 days (recurring).\n"
+    "Premium grants unlimited access to the bot's current preview, inspection, and messaging features while active.\n"
+    "Access remains active for the paid period."
+)
+
+
+def _referral_progress(count: int) -> str:
+    completed = count % 3
+    return "█" * (completed * 5) + "░" * (15 - completed * 5)
+
+
 @dp.message(Command("start"))
 async def start(message: Message, command: CommandObject) -> None:
     if not message.from_user:
@@ -221,22 +243,7 @@ async def start(message: Message, command: CommandObject) -> None:
             ),
         )
         return
-    if args.startswith("ref_") and not is_new_user:
-        await message.answer(
-            "Welcome back. Referral rewards are counted only when a new user starts the bot for the first time. Use /referral to get your own link."
-        )
-        return
-    if is_new_user:
-        await message.answer(
-            "Welcome! You have one free preview. Invite 3 new users with /referral to earn another, or use /buy for unlimited premium access at 250 Stars/month.\n\n"
-            "Send a website link, Telegram bot username/link, Mini App link, or file to get a safe preview or inspection."
-            + (f"\n\n{referral_text}" if referral_text else "")
-        )
-        return
-    await message.answer(
-        "Hi! I can preview public web links and files, inspect public Telegram bots, and open Mini Apps from links. Use /buy for unlimited access at 250 Stars/month or /referral to earn free previews.\n\n"
-        "Commands: /buy, /terms, /status, /referral, /send @username message, /relay @username message, /stoprelay, /privacy."
-    )
+    await message.answer(START_MESSAGE)
 
 
 @dp.message(Command("buy"))
@@ -260,12 +267,7 @@ async def buy(message: Message) -> None:
 async def show_purchase_terms(callback: CallbackQuery) -> None:
     await callback.answer()
     if isinstance(callback.message, Message):
-        await callback.message.answer(
-            "<b>Premium subscription terms</b>\n"
-            "Price: 250 Telegram Stars every 30 days (recurring).\n"
-            "Premium grants unlimited access to the bot's current preview, inspection, and messaging features while active.\n"
-            "Access remains active for the paid period. Privacy details are available with /privacy."
-        )
+        await callback.message.answer(TERMS_MESSAGE)
 
 
 @dp.callback_query(F.data == "buy_terms:agree")
@@ -329,12 +331,7 @@ async def request_stars_invoice(callback: CallbackQuery) -> None:
 
 @dp.message(Command("terms"))
 async def terms_command(message: Message) -> None:
-    await message.answer(
-        "<b>Premium subscription terms</b>\n"
-        "Price: 250 Telegram Stars every 30 days (recurring).\n"
-        "Premium grants unlimited access to the bot's current preview, inspection, and messaging features while active.\n"
-        "Access remains active for the paid period. Privacy details are available with /privacy."
-    )
+    await message.answer(TERMS_MESSAGE)
 
 
 @dp.message(Command("status"))
@@ -346,17 +343,28 @@ async def status(message: Message) -> None:
         await message.answer("Owner access is free and unlimited.")
         return
     exp = store.paid_until(message.from_user.id)
+    credits = store.referral_stats(message.from_user.id)
+    progress = credits["referral_count"] % 3
+    bar = _referral_progress(credits["referral_count"])
     if exp > int(time.time()):
-        await message.answer(
-            f"Your subscription is active until <code>{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(exp))}</code>."
+        current_status = (
+            f"✅ Active until <code>{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(exp))}</code>"
         )
     else:
-        credits = store.referral_stats(message.from_user.id)
-        await message.answer(
-            f"Your subscription is inactive or expired. Free screenshot previews remaining: {credits['free_uses']}. "
-            f"Successful referrals: {credits['referral_count']} ({credits['referral_count'] % 3}/3 toward the next preview). "
-            "Use /referral or /buy for unlimited access at 250 Stars/month (recurring every 30 days)."
-        )
+        current_status = "Inactive"
+    await message.answer(
+        "<b>⚠️ ACCOUNT STATUS:</b>\n"
+        f"<i>🔻 Current Status:</i> {current_status}\n"
+        f"<i>📸 Free Previews Left:</i> {credits['free_uses']}\n"
+        "🎁 REFERRAL PROGRESS\n"
+        f"[{bar}] {progress}/3 Invites\n"
+        "└ Invite 3 friends to earn +1 Free Preview Pass!\n"
+        "───────────────\n"
+        "<b>💎 UNLIMITED PRO ACCESS</b>\n"
+        "Get instant, unrestricted Web &amp; Mini App screenshots + anonymous userbot relays for 250 Stars/month (auto-renews every 30 days).\n"
+        "🛒 /buy — Unlock Unlimited Access\n"
+        "🎁 /referral — Get Free Preview Credits"
+    )
 
 
 @dp.message(Command("referral", "refer"))
@@ -372,11 +380,11 @@ async def referral_command(message: Message) -> None:
         )
         return
     await message.answer(
-        f"Invite 3 new people to start the bot using your link and earn 1 free screenshot preview.\n\n"
-        f"Your link:\n{link}\n\n"
-        f"Successful referrals: {referral['referral_count']} "
-        f"({referral['referral_count'] % 3}/3 toward the next preview).\n"
-        f"Free previews available: {referral['free_uses']}\n"
+        "Invite 3 new people to start the bot using your link and earn 1 free screenshot preview.\n\n"
+        f"<b>Your link:</b>\n{link}\n\n"
+        f"<i>Successful referrals:</i> {referral['referral_count']} "
+        f"({referral['referral_count'] % 3}/3)\n"
+        f"<i>Free previews available:</i> {referral['free_uses']}\n"
         "Only first-time users count."
     )
 
@@ -979,7 +987,7 @@ async def text_message(message: Message) -> None:
             )
         return
     await message.answer(
-        "Send me a public website link (with or without https://), a Telegram bot username/link, a Mini App link, or any file. Common documents get content previews; other file types get a safe metadata card. New users get one free preview; use /referral for another. Use /help for commands."
+        "Send me a public website link (with or without https://), a Telegram bot username/link, or any file. Common documents get content previews; other file types get a safe metadata card."
     )
 
 
