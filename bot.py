@@ -750,8 +750,7 @@ async def _inspect_telegram_bot(message: Message, username: str) -> None:
         return
 
     await message.answer(
-        f"If @{_escape(username)} is a public bot, the connected Telegram account will send /start and the bot can see that account's identity. "
-        "I will only read recent replies and button labels; I will not submit forms or make purchases."
+        f"Checking @{_escape(username)}. Wait a moment...."
     )
     try:
         inspection = await userbot_service.inspect_public_bot(
