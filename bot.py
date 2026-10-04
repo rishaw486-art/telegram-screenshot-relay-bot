@@ -1259,14 +1259,8 @@ async def confirm_broadcast(callback: CallbackQuery) -> None:
 
 @dp.message(Command("help"))
 async def help_command(message: Message) -> None:
-    owner_commands = (
-        "\nOwner: /ownerhelp, /botstatus, /message, /broadcast."
-        if message.from_user and message.from_user.id in settings.owner_ids
-        else ""
-    )
     await message.answer(
-        "Send any public web link, Telegram bot username/link, Mini App link, or file. Common documents are parsed without execution; other formats receive a metadata preview. New users get one free preview; invite 3 new users with /referral to earn another. Use /buy for unlimited access at 250 Stars/month (recurring every 30 days); read /terms.\n\nCommands: /buy, /terms, /status, /referral, /send @username message, /relay @username message, /stoprelay, /privacy.\n\n/send sends through the connected userbot account; the recipient does not need to start this bot and replies return here. The recipient sees the userbot account's identity. Public bot inspection sends /start from that account; Mini Apps may receive its Telegram identity and launch data. /relay is a separate opt-in bot-to-bot mode."
-        + owner_commands
+        "Send any public web link, Telegram bot username/link, Mini App link, or file. Common documents are parsed without execution; other formats receive a metadata preview."
     )
 
 
