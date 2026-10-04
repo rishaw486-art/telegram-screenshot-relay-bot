@@ -466,15 +466,13 @@ async def send_via_userbot(message: Message, command: CommandObject) -> None:
         )
         return
     try:
-        account_label = await userbot_service.send_to_username(
+        await userbot_service.send_to_username(
             message.from_user.id, username, text
         )
     except UserbotSendError as exc:
         await message.answer(_escape(str(exc)))
         return
-    await message.answer(
-        f"Sent to @{_escape(username)} from {account_label}. The recipient does not need to start this bot. They will see the connected Telegram account's identity; if they reply to it, the reply will be delivered here. Use /stoprelay to stop forwarding replies."
-    )
+    await message.answer(f"sent to @{_escape(username)}")
 
 
 @dp.message(Command("relay"))
