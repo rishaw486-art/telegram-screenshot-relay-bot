@@ -168,6 +168,58 @@ def test_unknown_binary_file_gets_metadata_only_preview(monkeypatch, tmp_path: P
     assert "was not executed" in captured["text"]
 
 
+def test_text_code_file_gets_content_preview(monkeypatch, tmp_path: Path):
+    source = tmp_path / "example.py"
+    source.write_text("print('safe preview')\n", encoding="utf-8")
+    captured = {}
+
+    async def fake_preview(title, text, max_bytes, description):
+        captured.update(title=title, text=text, description=description)
+        return b"preview", title, description
+
+    monkeypatch.setattr(capture, "_render_text_preview", fake_preview)
+    result = asyncio.run(capture.render_file(source, "text/x-python", 1000))
+    assert result[0] == b"preview"
+    assert "safe preview" in captured["text"]
+    assert captured["description"] == "Text preview rendered safely."
+
+
+def test_zip_file_gets_names_only_preview(monkeypatch, tmp_path: Path):
+    archive_path = tmp_path / "files.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("docs/readme.txt", "contents are not extracted")
+    captured = {}
+
+    async def fake_preview(title, text, max_bytes, description):
+        captured.update(title=title, text=text, description=description)
+        return b"preview", title, description
+
+    monkeypatch.setattr(capture, "_render_text_preview", fake_preview)
+    result = asyncio.run(capture.render_file(archive_path, "application/zip", 1000))
+    assert result[0] == b"preview"
+    assert "docs/readme.txt" in captured["text"]
+    assert "not extracted" in captured["description"]
+
+
+def test_rar_and_7z_signatures_get_safe_metadata(monkeypatch, tmp_path: Path):
+    for filename, signature, expected in (
+        ("archive.rar", b"Rar!\x1a\x07\x00", "RAR archive"),
+        ("archive.7z", b"7z\xbc\xaf\x27\x1c\x00", "7z archive"),
+    ):
+        path = tmp_path / filename
+        path.write_bytes(signature + b"safe test data")
+        captured = {}
+
+        async def fake_preview(title, text, max_bytes, description):
+            captured.update(title=title, text=text, description=description)
+            return b"preview", title, description
+
+        monkeypatch.setattr(capture, "_render_text_preview", fake_preview)
+        result = asyncio.run(capture.render_file(path, "application/octet-stream", 1000))
+        assert result[0] == b"preview"
+        assert expected in captured["text"]
+
+
 def test_userbot_bot_inspection_reads_start_reply_and_webapp_button(monkeypatch):
     bot_entity = types.User(
         id=42, access_hash=1, first_name="Demo Bot", username="demobot", bot=True

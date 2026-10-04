@@ -3,7 +3,9 @@ from __future__ import annotations
 import html
 import ipaddress
 import json
+import shutil
 import socket
+import subprocess
 import tempfile
 import tarfile
 import zipfile
@@ -370,7 +372,7 @@ async def render_file(
         except (OSError, zipfile.BadZipFile, ET.ParseError, RuntimeError, ValueError):
             # Malformed, encrypted, or over-sized containers fall through to a safe metadata card.
             pass
-    if suffix in {".zip", ".epub", ".tar", ".tgz", ".gz", ".bz2", ".xz"}:
+    if suffix in {".zip", ".epub", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".rar", ".7z"}:
         try:
             names = _archive_listing(path)
             summary = "Archive contents (names only; no files were extracted):\n" + "\n".join(names)
@@ -484,6 +486,36 @@ def _archive_listing(path: Path) -> list[str]:
                 f"{member.name[:180]} ({member.size:,} bytes)"
                 for member in members[:100]
             ] or ["The archive is empty."]
+    archive_tool = shutil.which("7z") or shutil.which("7zz")
+    if archive_tool:
+        try:
+            result = subprocess.run(
+                [archive_tool, "l", "-slt", "-bd", "--", str(path)],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise tarfile.ReadError("Archive listing timed out or failed") from exc
+        if result.returncode == 0:
+            entries: list[str] = []
+            current_name: str | None = None
+            current_size: str | None = None
+            for line in result.stdout.splitlines():
+                if line.startswith("Path = "):
+                    if current_name and current_name not in {str(path), "[Content]"}:
+                        entries.append(f"{current_name[:180]} ({current_size or 'unknown'} bytes)")
+                    current_name = line[7:]
+                    current_size = None
+                elif line.startswith("Size = "):
+                    current_size = line[7:]
+            if current_name and current_name not in {str(path), "[Content]"}:
+                entries.append(f"{current_name[:180]} ({current_size or 'unknown'} bytes)")
+            if entries:
+                return entries[:100]
+            return ["The archive is empty."]
     raise tarfile.ReadError("Unsupported or malformed archive")
 
 
@@ -520,6 +552,8 @@ async def _render_file_metadata(
         (b"GIF89a", "GIF image"),
         (b"PK\x03\x04", "ZIP-based container"),
         (b"\x1f\x8b", "GZIP archive"),
+        (b"Rar!\x1a\x07", "RAR archive"),
+        (b"7z\xbc\xaf\x27\x1c", "7z archive"),
         (b"MZ", "Windows executable format (not executed)"),
         (b"\x7fELF", "Linux executable format (not executed)"),
         (b"ID3", "MP3 audio"),
